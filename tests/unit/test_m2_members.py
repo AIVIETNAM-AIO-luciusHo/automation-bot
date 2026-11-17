@@ -290,3 +290,25 @@ def test_summary_line_zero_when_clean(ws, capsys) -> None:
     assert rc == 0
     summary = [ln for ln in out.splitlines() if "task" in ln][-1]
     assert "0 lỗi" in summary and "0 cảnh báo" in summary and "0 BLOCK" in summary, summary
+
+
+# ---- hardening round 3: pathological YAML must fail cleanly, not crash ----------------------
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "members: " + "[" * 100_000 + "]" * 100_000 + "\n",
+        "members: " + "{a: " * 30_000 + "1" + "}" * 30_000 + "\n",
+    ],
+    ids=["deep_flow_sequence", "deep_flow_mapping"],
+)
+def test_deeply_nested_members_yaml_rejected_without_traceback(ws, capsys, text) -> None:
+    rc, out = run(ws, capsys, task("TV01"), text)
+    assert rc != 0
+    assert "Traceback" not in out and "RecursionError" not in out
+
+
+def test_empty_members_flag_is_an_error_not_a_silent_skip(ws, capsys) -> None:
+    rc, out = run(ws, capsys, task("TV99"), MEMBERS_OK, members_path="")
+    assert rc == 2, out  # leader-confirmed contract: `--members ""` -> exit 2
+    assert "Traceback" not in out

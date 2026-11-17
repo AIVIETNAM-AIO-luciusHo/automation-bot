@@ -85,8 +85,8 @@ class Directory:
     def from_text(cls, text: str) -> "Directory":
         try:
             data = _safe_load_unique(text)
-        except yaml.YAMLError as e:
-            raise MembersError("Danh bạ không phải YAML hợp lệ.") from e
+        except (yaml.YAMLError, RecursionError) as e:  # RecursionError: YAML lồng quá sâu
+            raise MembersError("Danh bạ không phải YAML hợp lệ (hoặc lồng quá sâu).") from e
         raw = data.get("members") if isinstance(data, dict) else None
         if not isinstance(raw, dict) or not raw:
             raise MembersError("Danh bạ cần khóa `members:` là mapping không rỗng.")
