@@ -533,3 +533,47 @@ def test_plain_403_without_rate_limit_headers_is_a_permission_block(gh, capsys) 
     fake = FakeGitHub(repo_status=403)
     rc, _ = run(gh, capsys, fake)
     assert rc != 0 and len(fake.requests) == 1  # no pointless retry of a permission error
+
+
+# ---- hardening round: oversized bodies, label list too long, control chars in --repo ---------
+
+@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
+def test_oversized_response_body_is_not_accepted(gh, capsys) -> None:
+    pad = b"x" * 20_000_000  # a real repo JSON is ~5 KB; anything this big must be refused
+
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.rstrip("/") == "/repos/owner/repo":
+            body = (b'{"full_name":"owner/repo","has_issues":true,"archived":false,'
+                    b'"permissions":{"push":true},"pad":"' + pad + b'"}')
+            return httpx.Response(200, content=body)
+        return None
+
+    rc, out = run(gh, capsys, FakeGitHub(override=big))
+    assert rc != 0 and out.strip(), "20 MB repo response must be BLOCKed (response size cap)"
+
+
+@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
+def test_oversized_label_page_is_not_accepted(gh, capsys) -> None:
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.endswith("/labels"):
+            items = [{"id": 1, "name": "backend", "pad": "x" * 20_000_000}]
+            return httpx.Response(200, content=json.dumps(items))
+        return None
+
+    md = "## TASK-001: Một\n- Phụ trách: TV01\n- Labels: backend\n"
+    rc, _ = run(gh, capsys, FakeGitHub(override=big), md=md)
+    assert rc != 0
+
+
+def test_label_list_longer_than_the_page_budget_is_never_treated_as_complete(gh, capsys) -> None:
+    many = [f"label-{i:04d}" for i in range(1500)]
+    md = "## TASK-001: Một\n- Phụ trách: TV01\n- Labels: label-9999\n"
+    rc, out = run(gh, capsys, FakeGitHub(labels=many), md=md)
+    assert rc != 0 and out.strip()
+
+
+def test_control_characters_in_repo_arg_are_not_echoed_raw(gh, capsys) -> None:
+    rc, out = run(gh, capsys, args=["--check-github", "--repo", "owner/repo\x1b[31mX\r"])
+    assert rc != 0
+    assert "\x1b" not in out and "\r" not in out, repr(out)
+    assert gh.fake.requests == []

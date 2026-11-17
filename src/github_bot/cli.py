@@ -1,4 +1,5 @@
 import argparse
+import re
 from pathlib import Path
 
 import httpx
@@ -9,6 +10,13 @@ from github_bot.github.validator import validate_against_github
 from github_bot.identities.resolver import MembersError, load_members, resolve_task
 from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
+
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _show(msg: str) -> str:
+    """In thông báo an toàn: ký tự điều khiển (ESC, CR...) từ dữ liệu người dùng bị thoát, không tới terminal."""
+    return _CTRL.sub(lambda m: f"\\x{ord(m.group()):02x}", msg)
 
 
 def _validate(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
@@ -22,18 +30,18 @@ def _validate(args: argparse.Namespace, transport: httpx.BaseTransport | None = 
     try:
         text, source = load_markdown(args.input, args.workspace)
     except LoaderError as e:
-        print(f"LỖI: {e}")
+        print(_show(f"LỖI: {e}"))
         return 2
     directory = None
     if args.members is not None:
         try:
             directory = load_members(args.members, args.workspace)
         except MembersError as e:
-            print(f"LỖI danh bạ: {e}")
+            print(_show(f"LỖI danh bạ: {e}"))
             return 2
     result = parse_markdown(text, source)
     for d in result.diagnostics:
-        print(f"{d.level.upper()} dòng {d.line} [{d.code}] {d.message}")
+        print(_show(f"{d.level.upper()} dòng {d.line} [{d.code}] {d.message}"))
     blocks = warns = 0
     resolved = []
     if directory is not None:
@@ -43,17 +51,17 @@ def _validate(args: argparse.Namespace, transport: httpx.BaseTransport | None = 
             for b in r.diagnostics:
                 blocks += b.level == "error"
                 warns += b.level == "warning"
-                print(f"{'BLOCK' if b.level == 'error' else 'WARNING'} [{b.code}] {b.message}")
+                print(_show(f"{'BLOCK' if b.level == 'error' else 'WARNING'} [{b.code}] {b.message}"))
     if args.check_github:
         try:
             client = GitHubClient(transport=transport)
         except GitHubError as e:
-            print(f"LỖI: {e.message}")
+            print(_show(f"LỖI: {e.message}"))
             return 2
         try:
             for b in validate_against_github(client, args.repo, result.tasks, resolved):
                 blocks += 1
-                print(f"BLOCK [{b.code}] {b.message}")
+                print(_show(f"BLOCK [{b.code}] {b.message}"))
         finally:
             client.close()
     errors = len(result.errors)

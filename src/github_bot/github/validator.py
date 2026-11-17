@@ -14,19 +14,20 @@ def validate_against_github(
 ) -> list[Diagnostic]:
     """Trả danh sách BLOCK (rỗng = hợp lệ). Task đã BLOCK ở M2a không bị kiểm lại."""
     owner, _, name = repo.partition("/")
+    shown = repr(repo[:60])  # --repo là giá trị người dùng nhập: không in nguyên văn
     try:
         info = client.get_repo(owner, name)
         if info is None:
-            return [_err("REPO_NOT_FOUND", f"{repo}: không tồn tại hoặc token không có quyền truy cập.")]
+            return [_err("REPO_NOT_FOUND", f"{shown}: không tồn tại hoặc token không có quyền truy cập.")]
         full = info.get("full_name")
         if not isinstance(full, str) or full.casefold() != repo.casefold():
-            return [_err("BAD_RESPONSE", f"{repo}: phản hồi repo thiếu hoặc sai full_name.")]
+            return [_err("BAD_RESPONSE", f"{shown}: phản hồi repo thiếu hoặc sai full_name.")]
         if info.get("archived") is not False or info.get("disabled") is True:
-            return [_err("REPO_READONLY", f"{repo}: repo bị archive/disabled hoặc thiếu trường archived.")]
+            return [_err("REPO_READONLY", f"{shown}: repo bị archive/disabled hoặc thiếu trường archived.")]
         if info.get("has_issues") is not True:
-            return [_err("ISSUES_DISABLED", f"{repo}: repo tắt Issues hoặc thiếu trường has_issues.")]
+            return [_err("ISSUES_DISABLED", f"{shown}: repo tắt Issues hoặc thiếu trường has_issues.")]
     except GitHubError as e:
-        return [_err(e.code, f"{repo}: {e.message}")]
+        return [_err(e.code, f"{shown}: {e.message}")]
 
     by_id = {t.id: t for t in tasks}
     ok = [r for r in resolved if not r.blocked]
@@ -34,7 +35,7 @@ def validate_against_github(
         perms = info.get("permissions")
         # GitHub âm thầm bỏ assignee nếu người tạo thiếu quyền push/triage -> BLOCK, thiếu trường cũng BLOCK.
         if not isinstance(perms, dict) or not (perms.get("push") is True or perms.get("triage") is True):
-            return [_err("NO_ASSIGN_PERMISSION", f"{repo}: token thiếu quyền push/triage nên assignee sẽ bị bỏ im lặng.")]
+            return [_err("NO_ASSIGN_PERMISSION", f"{shown}: token thiếu quyền push/triage nên assignee sẽ bị bỏ im lặng.")]
     diags: list[Diagnostic] = []
     try:
         assignable: dict[str, bool] = {}
@@ -48,13 +49,13 @@ def validate_against_github(
                         diags.append(_err(e.code, f"{r.task_id}: kiểm tra assignee {login!r} thất bại: {e.message}"))
                         return diags
                 if not assignable[key]:
-                    diags.append(_err("NOT_ASSIGNABLE", f"{r.task_id}: {login!r} không thể được assign trong {repo}."))
+                    diags.append(_err("NOT_ASSIGNABLE", f"{r.task_id}: {login!r} không thể được assign trong {shown}."))
         if any(by_id[r.task_id].labels for r in ok):
             existing = client.label_names(owner, name)
             for r in ok:
                 for label in by_id[r.task_id].labels:
                     if label.casefold() not in existing:  # ensure_labels_exist=false: không tự tạo
-                        diags.append(_err("LABEL_MISSING", f"{r.task_id}: label {label[:50]!r} không tồn tại trong {repo}."))
+                        diags.append(_err("LABEL_MISSING", f"{r.task_id}: label {label[:50]!r} không tồn tại trong {shown}."))
     except GitHubError as e:  # lỗi hệ thống giữa chừng (mạng, 5xx, 401/403, rate limit): dừng, BLOCK
-        diags.append(_err(e.code, f"{repo}: {e.message} Kết quả kiểm tra không đầy đủ."))
+        diags.append(_err(e.code, f"{shown}: {e.message} Kết quả kiểm tra không đầy đủ."))
     return diags
