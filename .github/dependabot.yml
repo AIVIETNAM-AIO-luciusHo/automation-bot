@@ -2,13 +2,11 @@
 # PR do Dependabot mở do người dùng review và merge; không bật auto-merge.
 version: 2
 updates:
-  - package-ecosystem: "uv" # đọc pyproject.toml + uv.lock
+  - package-ecosystem: "uv" # file mà uv đọc: chưa xác nhận trong tài liệu GitHub
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
-    # Label chưa tồn tại trong repo sẽ bị Dependabot bỏ qua (không tự tạo).
-    labels: ["dependencies"]
     commit-message:
       prefix: "chore(deps)"
     groups:
@@ -21,7 +19,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
-    labels: ["dependencies"]
     commit-message:
       prefix: "chore(deps)"
     groups:
