@@ -67,6 +67,7 @@ def test_loader_blocks_outside(tmp_path: Path):
 def test_cli_validate_exit_codes(tmp_path: Path, capsys):
     (tmp_path / "a.md").write_text("## TASK-001: ok\n")
     (tmp_path / "b.md").write_text("## TASK-001: a\n## TASK-001: b\n")
+    (tmp_path / "m.yaml").write_text("members:\n  TV01: {display_name: A, github: dev-a}\n")
     base = ["issues", "validate", "--workspace", str(tmp_path), "--members", "m.yaml"]
     assert main([*base, "--input", "a.md"]) == 0
     assert main([*base, "--input", "b.md"]) == 1

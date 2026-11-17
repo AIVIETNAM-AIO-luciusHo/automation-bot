@@ -62,7 +62,7 @@ def build_task(
         diags.append(Diagnostic(level="warning", code="UNKNOWN_PRIORITY", line=line,
                                 message=f"{task_id}: ưu tiên '{prio[:30]}' không nhận diện được, bỏ qua."))  # fmt: skip
     # GitHub login ghi rõ: bỏ '@' đầu, không suy đoán thêm.
-    github = [x.lstrip("@") for x in split_list(fields.get("github", ""))]
+    github = [x.removeprefix("@") for x in split_list(fields.get("github", ""))]  # chỉ bỏ MỘT @; `@@x` để resolver chặn
     try:
         return Task(
             id=task_id_full,
