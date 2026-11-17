@@ -154,6 +154,19 @@ BAD_MEMBERS = {
         "members:\n  TV01: {display_name: A, github: example-dev-1}\n"
         "  tv01: {display_name: B, github: example-dev-2}\n"
     ),
+    "alias_equals_other_members_login": (
+        "members:\n  TV01: {display_name: A, github: example-dev-1, aliases: ['example-dev-2']}\n"
+        "  TV02: {display_name: B, github: example-dev-2}\n"
+    ),
+    "display_name_equals_other_members_login": (
+        "members:\n  TV01: {display_name: example-dev-2, github: example-dev-1}\n"
+        "  TV02: {display_name: B, github: example-dev-2}\n"
+    ),
+    "login_with_trailing_newline": (
+        "members:\n  TV01:\n    display_name: A\n    github: |\n      example-dev-1\n"
+    ),
+    "blank_display_name": "members:\n  TV01: {display_name: ' ', github: example-dev-1}\n",
+    "blank_alias": "members:\n  TV01: {display_name: A, github: example-dev-1, aliases: ['']}\n",
     "duplicate_login_two_people": (
         "members:\n  TV01: {display_name: A, github: example-dev-1}\n"
         "  TV02: {display_name: B, github: example-dev-1}\n"
@@ -255,3 +268,25 @@ def test_validate_with_members_is_offline_deterministic_and_writes_nothing(
     second = run(ws, capsys, None, None)
     assert first == second and first[0] == 0
     assert sorted(p.name for p in ws.iterdir()) == before
+
+
+# ---- CLI summary line counts every warning (resolver warnings included) ------------------------
+
+def test_summary_line_counts_resolver_warnings_and_blocks(ws, capsys) -> None:
+    md = (
+        "## TASK-001: Một\n- Phụ trách: TV01\n\n"
+        "## TASK-002: Hai\n- Ưu tiên: High\n\n"      # NO_ASSIGNEE -> 1 warning
+        "## TASK-003: Ba\n- Ưu tiên: Low\n\n"          # NO_ASSIGNEE -> 2 warnings
+        "## TASK-004: Bốn\n- Phụ trách: TV99\n"         # 1 BLOCK
+    )
+    rc, out = run(ws, capsys, md, MEMBERS_OK)
+    assert rc != 0
+    summary = [ln for ln in out.splitlines() if "task" in ln and "BLOCK" in ln][-1]
+    assert "4 task" in summary and "2 cảnh báo" in summary and "1 BLOCK" in summary, summary
+
+
+def test_summary_line_zero_when_clean(ws, capsys) -> None:
+    rc, out = run(ws, capsys, task("TV01"), MEMBERS_OK)
+    assert rc == 0
+    summary = [ln for ln in out.splitlines() if "task" in ln][-1]
+    assert "0 lỗi" in summary and "0 cảnh báo" in summary and "0 BLOCK" in summary, summary

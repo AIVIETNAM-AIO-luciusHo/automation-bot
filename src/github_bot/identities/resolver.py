@@ -3,14 +3,14 @@ import unicodedata
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from github_bot.markdown.loader import LoaderError, read_workspace_file
 from github_bot.models import Diagnostic, Task
 
 # GitHub login: 1-39 ký tự chữ/số/'-', không bắt đầu/kết thúc bằng '-', không có '--'.
-GITHUB_LOGIN = re.compile(r"^(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
-_MEMBER_ID = re.compile(r"^TV\d+$", re.IGNORECASE)  # hai ID chỉ khác hoa/thường -> trùng khóa -> từ chối
+GITHUB_LOGIN = re.compile(r"(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
+_MEMBER_ID = re.compile(r"TV[0-9]+\Z", re.IGNORECASE)  # hai ID chỉ khác hoa/thường -> trùng khóa -> từ chối
 
 
 class MembersError(Exception):
@@ -22,10 +22,47 @@ class Member(BaseModel, extra="forbid"):
     github: str
     aliases: list[str] = []
 
+    @field_validator("display_name", "aliases")
+    @classmethod
+    def _not_blank(cls, v: str | list[str]) -> str | list[str]:
+        if any(not x.strip() for x in ([v] if isinstance(v, str) else v)):
+            raise ValueError("tên/alias rỗng")
+        return v
+
 
 def _key(s: str) -> str:
     """So khớp CHÍNH XÁC sau NFC + casefold + gộp khoảng trắng. Không bỏ dấu, không fuzzy."""
     return " ".join(unicodedata.normalize("NFC", s).casefold().split())
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader từ chối khóa trùng trong mapping (mặc định PyYAML ghi đè im lặng)."""
+
+
+def _no_dup_keys(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> object:
+    seen: set[object] = set()
+    for key_node, _ in node.value:
+        try:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"khóa trùng {str(key)[:30]!r}", key_node.start_mark
+                )
+            seen.add(key)
+        except TypeError as e:  # khóa không băm được (list/mapping)
+            raise yaml.constructor.ConstructorError(None, None, "khóa không hợp lệ", key_node.start_mark) from e
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup_keys)
+
+
+def _safe_load_unique(text: str) -> object:
+    loader = _UniqueKeyLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 
 class Directory:
@@ -33,17 +70,21 @@ class Directory:
         self.members = members
         self._names: dict[str, str] = {}
         self._logins: dict[str, str] = {}
+        owner = {m.github.casefold(): mid for mid, m in members.items()}
         for mid, m in members.items():
             for name in (mid, m.display_name, *m.aliases):
-                other = self._names.setdefault(_key(name), mid)
-                if other != mid:  # tên/alias/ID dùng chung cho 2 người -> danh bạ mơ hồ, từ chối
-                    raise MembersError(f"{name[:40]!r} trùng giữa {other} và {mid}.")
+                key = _key(name)
+                other = self._names.setdefault(key, mid)
+                # tên/alias/ID trùng giữa 2 người, hoặc trùng login của người KHÁC -> mơ hồ, từ chối
+                # (không phụ thuộc thứ tự tra giữa bảng tên và bảng login)
+                if other != mid or owner.get(key, mid) != mid:
+                    raise MembersError(f"{name[:40]!r} của {mid} trùng với {owner.get(key, other)}.")
             self._logins[m.github.casefold()] = m.github
 
     @classmethod
     def from_text(cls, text: str) -> "Directory":
         try:
-            data = yaml.safe_load(text)
+            data = _safe_load_unique(text)
         except yaml.YAMLError as e:
             raise MembersError("Danh bạ không phải YAML hợp lệ.") from e
         raw = data.get("members") if isinstance(data, dict) else None

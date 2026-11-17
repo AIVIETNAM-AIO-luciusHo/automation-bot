@@ -98,3 +98,26 @@ def test_member_ids_differing_only_by_case_rejected():
     with pytest.raises(MembersError):
         Directory.from_text("members:\n  TV01: {display_name: a, github: a1}\n  tv01: {display_name: b, github: b1}\n")
     assert resolve_task(task(assignees=["tv01"]), D).assignees == ["dev-a"]
+
+
+def _bad(text: str) -> None:
+    with pytest.raises(MembersError):
+        Directory.from_text(text)
+
+
+def test_cross_table_and_edge_cases_rejected():
+    head = "members:\n  TV01: {display_name: A, github: dev-a, aliases: [dev-b]}\n"
+    _bad(head + "  TV02: {display_name: B, github: dev-b}\n")  # alias của TV01 = login của TV02
+    _bad("members:\n  TV01: {display_name: A, github: dev-a}\n  TV02: {display_name: dev-a, github: dev-b}\n")
+    _bad("members:\n  TV01: {display_name: A, github: 'dev-a\\n'}\n")  # xuống dòng cuối
+    _bad("members:\n  \"TV01\\n\": {display_name: A, github: dev-a}\n")
+    _bad("members:\n  TV01: {display_name: '  ', github: dev-a}\n")
+    _bad("members:\n  TV01: {display_name: A, github: dev-a, aliases: ['']}\n")
+    _bad("members:\n  TV01: {display_name: A, github: dev-a}\n  TV01: {display_name: B, github: dev-b}\n")  # khóa trùng
+    assert D.resolve_ref("")[1] is not None
+
+
+def test_empty_members_path_is_an_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    (tmp_path / "t.md").write_text("## TASK-001: a\n")
+    rc = main(["issues", "validate", "--workspace", str(tmp_path), "--input", "t.md", "--members", ""])
+    assert rc == 2 and "LỖI danh bạ" in capsys.readouterr().out

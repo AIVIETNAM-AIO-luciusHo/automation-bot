@@ -15,7 +15,7 @@ def _validate(args: argparse.Namespace) -> int:
         print(f"LỖI: {e}")
         return 2
     directory = None
-    if args.members:
+    if args.members is not None:
         try:
             directory = load_members(args.members, args.workspace)
         except MembersError as e:
@@ -25,7 +25,7 @@ def _validate(args: argparse.Namespace) -> int:
     for d in result.diagnostics:
         print(f"{d.level.upper()} dòng {d.line} [{d.code}] {d.message}")
     blocks = warns = 0
-    if directory:
+    if directory is not None:
         for task in result.tasks:
             for b in resolve_task(task, directory).diagnostics:
                 blocks += b.level == "error"
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     v = issues.add_parser("validate", help="Kiểm tra file Markdown (offline)")
     v.add_argument("--input", required=True, help="File .md nằm trong workspace")
-    v.add_argument("--members", help="Danh bạ members.yaml (trong workspace): phân giải người phụ trách, BLOCK nếu không chắc")
+    v.add_argument("--members", help="Danh bạ members.yaml (trong workspace). KHÔNG truyền thì validate không phân giải người phụ trách")
     v.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc")
     v.set_defaults(func=_validate)
     args = parser.parse_args(argv)

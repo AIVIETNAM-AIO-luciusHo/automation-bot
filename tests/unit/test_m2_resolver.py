@@ -182,6 +182,13 @@ def test_unmapped_collaborator_blocks(members: Any) -> None:
         "- list\n",
         "",
         "members:\n  TV01: {display_name: A}\n",
+        (
+            "members:\n  TV01: {display_name: A, github: a1, aliases: ['b2']}\n"
+            "  TV02: {display_name: B, github: b2}\n"
+        ),
+        "members:\n  TV01: {display_name: b2, github: a1}\n  TV02: {display_name: B, github: b2}\n",
+        "members:\n  TV01:\n    display_name: A\n    github: |\n      a1\n",
+        "members:\n  TV01: {display_name: '  ', github: a1}\n",
         "members:\n  TV01: {display_name: A, github: a1}\n  tv01: {display_name: B, github: b2}\n",
         "members:\n  TV01: {display_name: A, github: 'bad login'}\n",
         "members:\n  TV01: {display_name: A, github: dup}\n  TV02: {display_name: B, github: DUP}\n",
@@ -204,3 +211,19 @@ def test_registry_is_loaded_with_safe_loader_only() -> None:
     assert "yaml.load(" not in code and "yaml.unsafe_load" not in code
     assert "yaml.full_load" not in code and "yaml.FullLoader" not in code
     assert "yaml.Loader" not in code
+
+
+def test_resolved_login_never_contains_whitespace_or_control_chars(members: Any) -> None:
+    for ref in ("TV01", "tv01", "@Example-Dev-1", "example-dev-1", "Anh A"):
+        r = _resolve(members, assignees=[ref])
+        assert all(x == x.strip() and x.isascii() and x.isprintable() for x in r.assignees), ref
+
+
+def test_nfd_and_nbsp_names_resolve_to_the_same_person_only(members: Any) -> None:
+    import unicodedata
+
+    nfd = unicodedata.normalize("NFD", "Nguyễn Văn A")
+    r = _resolve(members, assignees=[nfd, "Nguyễn\u00a0Văn A"])
+    assert not r.blocked and [x.lower() for x in r.assignees] == ["example-dev-1"]
+    for bad in ("Nguyễn\u200bVăn A", "ＴＶ０１", "＠example-dev-1"):   # ZWSP / fullwidth: no guess
+        assert _resolve(members, assignees=[bad]).blocked, repr(bad)
