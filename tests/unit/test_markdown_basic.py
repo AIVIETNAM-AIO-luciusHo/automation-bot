@@ -97,3 +97,9 @@ def test_malformed_lookalike_headings_and_long_id():
     tbl = "| Mã | Công việc |\n|---|---|\n| T01 | a |\n\n"
     assert "ORPHAN_TABLE_ROW" in codes(tbl + "| T02 | b | c |\n")
     assert "ORPHAN_TABLE_ROW" in codes(tbl + "| T02 |\n")
+
+
+def test_unclosed_comment_and_commented_task_warning():
+    assert "UNCLOSED_COMMENT" in codes("## TASK-001: a\n<!--\n## TASK-002: b\n")
+    r = parse_markdown("## TASK-001: a\n<!-- ## TASK-002: b -->\n", "x.md")
+    assert [t.id for t in r.tasks] == ["TASK-001"] and [d.code for d in r.diagnostics] == ["COMMENTED_TASK"]

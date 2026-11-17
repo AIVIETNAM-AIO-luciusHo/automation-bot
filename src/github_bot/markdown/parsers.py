@@ -14,7 +14,6 @@ from github_bot.models import Diagnostic, ParseResult, Task
 _TASK_HEADING = re.compile(r"^(TASK-\d+)\s*:\s*(\S.*)$")
 _ID = re.compile(r"^[A-Za-z]+-?\d+$")
 _SEP_CELL = re.compile(r"^:?-+:?$")
-_TASKISH = re.compile(r"^TASK\s*[-:_#\d]", re.IGNORECASE)  # không khớp TASKS, "Task list"
 _BULLET_KV = re.compile(r"^[-*]\s+([^:]+?)\s*:\s*(.*)$")
 _BULLET = re.compile(r"^[-*]\s+(?:\[[ xX]\]\s*)?(\S.*)$")
 _DESC = {"mo ta", "description"}
@@ -24,22 +23,66 @@ _META_FIELDS = {"assignees", "collaborators", "labels", "github", "priority"}
 Found = list[tuple[int, Task]]
 
 
-def _scan(text: str) -> tuple[list[tuple[int, str]], int | None]:
-    """([(số dòng từ 1, nội dung)], dòng mở fence chưa đóng). Bỏ nội dung trong code fence
-    (dữ liệu không đáng tin). Fence chỉ đóng bằng đúng ký tự đã mở."""
+_FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+_COMMENT = re.compile(r"<!--(.*?)-->")
+_DECOR = re.compile(r"^(?:\d+[.)]\s*)?[\s*_\[\]()`]*")
+
+
+def _taskish(head: str) -> bool:
+    """Heading trông như task (kể cả gõ nhầm: en dash, TASK.002, **TASK-002**, [TASK-002], 1. TASK-002)."""
+    h = _DECOR.sub("", head)
+    return bool(re.match(r"^TASK(?:[-–—_.#:\s]*\d|\s*[-–—:_#])", h, re.IGNORECASE))
+
+
+def _scan(text: str) -> tuple[list[tuple[int, str]], list[Diagnostic]]:
+    """([(số dòng từ 1, nội dung)], diagnostics của lớp quét). Bỏ code fence và comment HTML
+    (dữ liệu không đáng tin). Fence đóng bằng cùng ký tự, độ dài >= fence mở, không có info string."""
     out: list[tuple[int, str]] = []
-    marker = ""
+    diags: list[Diagnostic] = []
+    fence = ""
     opened = 0
+    in_comment = 0  # dòng mở comment chưa đóng
+
+    def note_comment(inner: str, n: int) -> None:
+        for ln in inner.splitlines() or [inner]:
+            m = re.match(r"^\s*#{1,6}\s*(.+)$", ln)
+            if m and _taskish(m.group(1)):
+                diags.append(Diagnostic(level="warning", code="COMMENTED_TASK", line=n,
+                                        message="Heading task nằm trong comment HTML, không tạo task."))  # fmt: skip
+
     for n, line in enumerate(text.splitlines(), 1):
-        st = line.lstrip()
-        if st.startswith(("```", "~~~")):
-            if not marker:
-                marker, opened = st[0], n
-            elif st[0] == marker:
-                marker = ""
-        elif not marker:
+        f = _FENCE.match(line.lstrip())
+        if fence:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
+                fence = ""
+            continue
+        if in_comment:
+            end = line.find("-->")
+            note_comment(line if end < 0 else line[:end], n)
+            if end < 0:
+                continue
+            in_comment, line = 0, line[end + 3 :]
+            f = _FENCE.match(line.lstrip())
+        if f:
+            fence, opened = f.group(1), n
+            continue
+        for m in _COMMENT.finditer(line):
+            note_comment(m.group(1), n)
+        line = _COMMENT.sub("", line)
+        start = line.find("<!--")
+        if start >= 0:
+            in_comment = n
+            note_comment(line[start + 4 :], n)
+            line = line[:start]
+        if line.strip() or not in_comment:
             out.append((n, line))
-    return out, (opened if marker else None)
+    if fence:
+        diags.append(Diagnostic(level="error", code="UNCLOSED_FENCE", line=opened,
+                                message="Code fence không đóng; phần sau bị bỏ qua."))  # fmt: skip
+    if in_comment:
+        diags.append(Diagnostic(level="error", code="UNCLOSED_COMMENT", line=in_comment,
+                                message="Comment HTML không đóng; phần sau bị bỏ qua."))  # fmt: skip
+    return out, diags
 
 
 def _lines(text: str) -> list[tuple[int, str]]:
@@ -70,7 +113,7 @@ def parse_headings(text: str, source_file: str) -> tuple[Found, list[Diagnostic]
 
     for n, line in _lines(text):
         wrong = re.match(r"^(#{1,6})\s*(.+?)\s*$", line)
-        if wrong and len(wrong.group(1)) != 2 and _TASKISH.match(wrong.group(2)):
+        if wrong and len(wrong.group(1)) != 2 and _taskish(wrong.group(2)):
             diags.append(Diagnostic(level="error", code="WRONG_HEADING_LEVEL", line=n,
                                     message="Heading task phải là cấp 2 ('## TASK-<số>: <tên>')."))  # fmt: skip
         m = re.match(r"^##(?!#)\s*(.+?)\s*$", line)
@@ -78,7 +121,7 @@ def parse_headings(text: str, source_file: str) -> tuple[Found, list[Diagnostic]
             close()
             cur = None
             head = m.group(1)
-            if _TASKISH.match(head):
+            if _taskish(head):
                 t = _TASK_HEADING.match(head)
                 if t and line[2:3].isspace():
                     cur = _Section(t.group(1), n, {"title": t.group(2).strip()})
@@ -213,10 +256,7 @@ def parse_markdown(text: str, source_file: str) -> ParseResult:
     h, hd = parse_headings(text, source_file)
     t, td = parse_tables(text, source_file)
     diags = hd + td
-    unclosed = _scan(text)[1]
-    if unclosed:
-        diags.append(Diagnostic(level="error", code="UNCLOSED_FENCE", line=unclosed,
-                                message="Code fence không đóng; phần sau bị bỏ qua."))  # fmt: skip
+    diags += _scan(text)[1]
     seen: dict[str, int] = {}
     tasks: list[Task] = []
     for line, task in sorted(h + t, key=lambda x: x[0]):
