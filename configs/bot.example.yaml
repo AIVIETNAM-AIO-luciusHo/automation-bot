@@ -1,0 +1,36 @@
+bot:
+  default_mode: dry_run
+  write_enabled: false
+  max_tasks_per_run: 50
+  auto_merge: false
+
+markdown:
+  accepted_formats: [task_sections, tables]
+  require_stable_task_id: true
+  ai_fallback: false
+
+issues:
+  create: true
+  sync: false
+  auto_close: false
+  allow_assign_collaborators: false
+  skip_existing: true
+  require_approval_hash: true
+  ensure_labels_exist: false     # thiếu label => báo lỗi, không tự tạo
+
+github:
+  allowed_repositories:
+    - "OWNER/REPO"
+  auth: environment_token       # đọc token từ biến môi trường GITHUB_TOKEN
+
+dependabot:
+  enabled: false
+  initial_ecosystem: pip
+  create_pr: true
+  auto_merge: false
+
+ai:
+  enabled: false
+  provider: none                 # none | gemini | ollama_local
+  max_requests_per_run: 0
+  no_paid_fallback: true

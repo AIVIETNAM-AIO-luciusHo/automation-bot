@@ -1,0 +1,8 @@
+# LƯU Ý: schema TẠM, sẽ chốt khi M2/M3 đọc file này.
+# Chính sách an toàn (đặc tả §0, §4.2, §14). Giá trị mặc định = an toàn nhất.
+policy:
+  issue_label_policy: existing-only   # label thiếu => lỗi
+  unresolved_assignee: block          # không đoán danh tính
+  duplicate_marker: fail_closed
+  require_approval_hash: true
+  allow_reopen_or_delete: false
