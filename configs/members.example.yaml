@@ -1,0 +1,18 @@
+# Username bên dưới chỉ là placeholder, không phải tài khoản GitHub thật.
+members:
+  TV01:
+    display_name: "Nguyễn Văn A"
+    github: "example-dev-1"
+    aliases: ["Anh A"]
+  TV02:
+    display_name: "Trần Văn B"
+    github: "example-dev-2"
+    aliases: []
+  TV03:
+    display_name: "Lê Văn C"
+    github: "example-dev-3"
+    aliases: []
+  TV06:
+    display_name: "Phạm Văn D"
+    github: "example-dev-6"
+    aliases: []
