@@ -37,6 +37,7 @@ Mẫu báo cáo (bắt buộc): `What changed / Files / Commands run / Test resu
 - Mở PR ngay khi coder **và** tester cùng báo PASS cho milestone. Không PR khi một bên chưa xong.
 - **Mỗi PR tối đa 15 file thay đổi** (`git diff --stat base...head`). Vượt thì tách PR theo nhóm file hoặc milestone con.
 - Không commit thẳng `main`; mỗi PR một nhánh. Không đưa `*.Zone.Identifier`, `.venv`, `.env`, `configs/*.yaml` thật vào PR. Không auto-merge; người dùng là người merge.
+- Mỗi PR là một task cụ thể, tối đa 15 file; Dependabot được bật, PR của Dependabot do người dùng review và merge.
 - Kế hoạch: PR1 = M0 (nhánh `feat/m0-scaffold`, base `main`). PR2 = M1 (nhánh `feat/m1-parser`, base `feat/m0-scaffold` để diff chỉ có file M1).
 
 ## 4. Milestone
