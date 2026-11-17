@@ -24,14 +24,15 @@ def _validate(args: argparse.Namespace) -> int:
     result = parse_markdown(text, source)
     for d in result.diagnostics:
         print(f"{d.level.upper()} dòng {d.line} [{d.code}] {d.message}")
-    blocks = 0
+    blocks = warns = 0
     if directory:
         for task in result.tasks:
             for b in resolve_task(task, directory).diagnostics:
                 blocks += b.level == "error"
+                warns += b.level == "warning"
                 print(f"{'BLOCK' if b.level == 'error' else 'WARNING'} [{b.code}] {b.message}")
     errors = len(result.errors)
-    print(f"{len(result.tasks)} task, {errors} lỗi, {len(result.diagnostics) - errors} cảnh báo, {blocks} BLOCK.")
+    print(f"{len(result.tasks)} task, {errors} lỗi, {len(result.diagnostics) - errors + warns} cảnh báo, {blocks} BLOCK.")
     return 1 if errors or blocks else 0
 
 
