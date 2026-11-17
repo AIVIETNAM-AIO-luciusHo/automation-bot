@@ -79,3 +79,45 @@ def test_no_silent_partial_loss(name: str) -> None:
     r = parse_markdown(PARTIAL[name], "x.md")
     dropped_ok = len(r.tasks) >= 2
     assert dropped_ok or r.diagnostics, f"{name}: second task dropped with no diagnostic"
+
+
+# --- M1.5 (Task B): written BEFORE the fix, red until coder lands it. ---
+_GOOD = "## TASK-001: ok\n- Phụ trách: TV01\n\n"
+TASKISH_HEADINGS = [
+    "## TASK–002: b",  # en dash
+    "## TASK.002: b",
+    "## **TASK-002**: b",
+    "## [TASK-002] b",
+    "## 1. TASK-002: b",
+]
+NOT_TASKS = ["## TASKS", "## Task list", "## Tasking notes", "## Taskforce", "# TASKS — My Project"]
+
+
+@pytest.mark.parametrize("heading", TASKISH_HEADINGS)
+def test_taskish_heading_variants_report_malformed_id(heading: str) -> None:
+    r = parse_markdown(_GOOD + heading + "\n- Phụ trách: TV02\n", "x.md")
+    assert [t.id for t in r.tasks] == ["TASK-001"]
+    assert "MALFORMED_ID" in {d.code for d in r.diagnostics}, heading
+
+
+@pytest.mark.parametrize("heading", NOT_TASKS)
+def test_non_task_headings_not_flagged(heading: str) -> None:
+    r = parse_markdown(heading + "\n" + _GOOD, "x.md")
+    assert [t.id for t in r.tasks] == ["TASK-001"]
+    assert r.diagnostics == [], [d.code for d in r.diagnostics]
+
+
+def test_valid_four_backtick_fence_is_not_unclosed() -> None:
+    md = _GOOD + "````\n```\n## TASK-002: hidden\n````\n"
+    r = parse_markdown(md, "x.md")
+    assert "UNCLOSED_FENCE" not in {d.code for d in r.diagnostics}
+    assert [t.id for t in r.tasks] == ["TASK-001"]  # fenced content stays data, not a task
+
+
+def test_html_comment_heading_is_not_a_task_and_warns() -> None:
+    r = parse_markdown(_GOOD + "<!--\n## TASK-002: hidden\n-->\n", "x.md")
+    assert [t.id for t in r.tasks] == ["TASK-001"]
+    assert any(d.level == "warning" for d in r.diagnostics), "commented task must warn"
+    # one-line comment form too
+    r = parse_markdown(_GOOD + "<!-- ## TASK-003: hidden -->\n", "x.md")
+    assert [t.id for t in r.tasks] == ["TASK-001"]
