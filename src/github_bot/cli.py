@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 from github_bot import __version__
-from github_bot.identities.resolver import MembersError, load_directory, resolve_task
+from github_bot.identities.resolver import MembersError, load_members, resolve_task
 from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
 
@@ -17,7 +17,7 @@ def _validate(args: argparse.Namespace) -> int:
     directory = None
     if args.members:
         try:
-            directory = load_directory(args.members, args.workspace)
+            directory = load_members(args.members, args.workspace)
         except MembersError as e:
             print(f"LỖI danh bạ: {e}")
             return 2
@@ -27,9 +27,9 @@ def _validate(args: argparse.Namespace) -> int:
     blocks = 0
     if directory:
         for task in result.tasks:
-            for b in resolve_task(task, directory).blocks:
-                blocks += 1
-                print(f"BLOCK [{b.code}] {b.message}")
+            for b in resolve_task(task, directory).diagnostics:
+                blocks += b.level == "error"
+                print(f"{'BLOCK' if b.level == 'error' else 'WARNING'} [{b.code}] {b.message}")
     errors = len(result.errors)
     print(f"{len(result.tasks)} task, {errors} lỗi, {len(result.diagnostics) - errors} cảnh báo, {blocks} BLOCK.")
     return 1 if errors or blocks else 0

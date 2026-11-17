@@ -10,7 +10,7 @@ from github_bot.models import Diagnostic, Task
 
 # GitHub login: 1-39 ký tự chữ/số/'-', không bắt đầu/kết thúc bằng '-', không có '--'.
 GITHUB_LOGIN = re.compile(r"^(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
-_MEMBER_ID = re.compile(r"^TV\d+$")
+_MEMBER_ID = re.compile(r"^TV\d+$", re.IGNORECASE)  # hai ID chỉ khác hoa/thường -> trùng khóa -> từ chối
 
 
 class MembersError(Exception):
@@ -87,7 +87,7 @@ class Directory:
         return None, ("UNKNOWN_MEMBER", f"{shown} không có trong danh bạ (không đoán).")
 
 
-def load_directory(path: str | Path, workspace: str | Path) -> Directory:
+def load_members(path: str | Path, workspace: str | Path) -> Directory:
     try:
         text, _ = read_workspace_file(path, workspace, (".yaml", ".yml"))
     except LoaderError as e:
@@ -95,22 +95,15 @@ def load_directory(path: str | Path, workspace: str | Path) -> Directory:
     return Directory.from_text(text)
 
 
-load_members = load_directory  # shortcut: bí danh tạm, bỏ khi hợp đồng test chốt
-
-
 class Resolved(BaseModel):
     task_id: str
     assignees: list[str] = []
     collaborators: list[str] = []
-    blocks: list[Diagnostic] = []
+    diagnostics: list[Diagnostic] = []  # error = BLOCK, warning = không chặn
 
     @property
     def blocked(self) -> bool:
-        return bool(self.blocks)
-
-    @property
-    def diagnostics(self) -> list[Diagnostic]:  # shortcut: bí danh cho blocks vì hợp đồng test chưa chốt; bỏ khi chốt
-        return self.blocks
+        return any(d.level == "error" for d in self.diagnostics)
 
 
 def _dedupe(logins: list[str]) -> list[str]:
@@ -123,10 +116,10 @@ def _dedupe(logins: list[str]) -> list[str]:
 def resolve_task(task: Task, directory: Directory, assign_collaborators: bool = False) -> Resolved:
     """Phân giải assignees/collaborators/github. Mọi tham chiếu không chắc chắn -> BLOCK toàn task
     (không bao giờ trả tập assignee thiếu). Người phối hợp chỉ thành assignee khi bật cờ rõ ràng."""
-    blocks: list[Diagnostic] = []
+    diags: list[Diagnostic] = []
 
     def block(code: str, msg: str) -> None:
-        blocks.append(Diagnostic(level="error", code=code, message=f"{task.id}: {msg}"))
+        diags.append(Diagnostic(level="error", code=code, message=f"{task.id}: {msg}"))
 
     def many(refs: list[str], prefix: str = "") -> list[str]:
         out: list[str] = []
@@ -146,7 +139,11 @@ def resolve_task(task: Task, directory: Directory, assign_collaborators: bool = 
     if explicit and have and not {x.casefold() for x in explicit} <= have:
         block("LOGIN_CONFLICT", f"phụ trách {[a[:30] for a in task.assignees]} -> {assignees} "
               f"nhưng trường GitHub ghi {explicit}; không chọn bên nào.")  # fmt: skip
-    if blocks:
-        return Resolved(task_id=task.id, blocks=blocks)
+    if diags:
+        return Resolved(task_id=task.id, diagnostics=diags)
+    if not task.assignees and not task.github:  # không bao giờ tự gán ai
+        diags.append(Diagnostic(level="warning", code="NO_ASSIGNEE",
+                                message=f"{task.id}: không có người phụ trách, issue sẽ không có assignee."))  # fmt: skip
     final = assignees + explicit + (collaborators if assign_collaborators else [])
-    return Resolved(task_id=task.id, assignees=_dedupe(final), collaborators=_dedupe(collaborators))
+    return Resolved(task_id=task.id, assignees=_dedupe(final), collaborators=_dedupe(collaborators),
+                    diagnostics=diags)  # fmt: skip

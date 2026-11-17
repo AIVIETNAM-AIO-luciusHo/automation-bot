@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from github_bot.cli import main
-from github_bot.identities.resolver import Directory, MembersError, load_directory, resolve_task
+from github_bot.identities.resolver import Directory, MembersError, load_members, resolve_task
 from github_bot.models import Task
 
 YAML = """
@@ -20,7 +20,7 @@ def task(**kw: object) -> Task:
 
 
 def codes(**kw: object) -> list[str]:
-    return [b.code for b in resolve_task(task(**kw), D).blocks]
+    return [d.code for d in resolve_task(task(**kw), D).diagnostics if d.level == "error"]
 
 
 def test_resolves_id_name_alias_and_explicit_login():
@@ -67,15 +67,15 @@ def test_bad_directory_raises_clean_error(text: str):
         Directory.from_text(text)
 
 
-def test_load_directory_workspace_guard(tmp_path: Path):
+def test_load_members_workspace_guard(tmp_path: Path):
     ws = tmp_path / "ws"
     ws.mkdir()
     (tmp_path / "out.yaml").write_text(YAML)
     (ws / "m.yaml").write_text(YAML)
-    assert len(load_directory("m.yaml", ws).members) == 3
+    assert len(load_members("m.yaml", ws).members) == 3
     for bad in ("../out.yaml", "missing.yaml"):
         with pytest.raises(MembersError):
-            load_directory(bad, ws)
+            load_members(bad, ws)
 
 
 def test_cli_block_and_bad_members(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -86,3 +86,15 @@ def test_cli_block_and_bad_members(tmp_path: Path, capsys: pytest.CaptureFixture
     assert main([*base, "--members", "m.yaml"]) == 1
     assert "BLOCK [UNKNOWN_MEMBER] TASK-001" in capsys.readouterr().out
     assert main([*base, "--members", "bad.yaml"]) == 2
+
+
+def test_no_assignee_warns_without_blocking_or_guessing():
+    r = resolve_task(task(collaborators=["TV01"]), D)
+    assert not r.blocked and r.assignees == []
+    assert [d.code for d in r.diagnostics] == ["NO_ASSIGNEE"] and r.diagnostics[0].level == "warning"
+
+
+def test_member_ids_differing_only_by_case_rejected():
+    with pytest.raises(MembersError):
+        Directory.from_text("members:\n  TV01: {display_name: a, github: a1}\n  tv01: {display_name: b, github: b1}\n")
+    assert resolve_task(task(assignees=["tv01"]), D).assignees == ["dev-a"]
