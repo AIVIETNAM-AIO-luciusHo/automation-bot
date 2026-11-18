@@ -72,6 +72,16 @@ def _text(s: str) -> str:
     return s
 
 
+def _extra(task: Task) -> list[str]:
+    """Mục tùy chọn (Epic, Phụ thuộc): chỉ xuất hiện khi có, nên body task cũ không đổi."""
+    rows = []
+    if task.epic:
+        rows.append(f"- Epic: {_text(task.epic)}")
+    if task.dependencies:
+        rows.append(f"- Phụ thuộc: {', '.join(_text(d) for d in task.dependencies)}")
+    return ["## Thông tin thêm", *rows, ""] if rows else []
+
+
 def build_body(task: Task, assignees: list[str], collaborators: list[str]) -> str:
     ac = "\n".join(f"- [ ] {_text(a)}" for a in task.acceptance_criteria) or "_(chưa có)_"
     lines = [
@@ -81,6 +91,7 @@ def build_body(task: Task, assignees: list[str], collaborators: list[str]) -> st
         f"- Phụ trách: {', '.join('@' + a for a in assignees) or '_(chưa có)_'}",
         f"- Phối hợp: {', '.join('@' + c for c in collaborators) or '_(chưa có)_'}",
         f"- Ưu tiên: {task.priority.capitalize() if task.priority else '_(chưa có)_'}", "",
+        *_extra(task),
         "## Nguồn công việc",
         f"- File: `{task.source_file.replace('`', chr(39))}`", f"- Task ID: `{task.id}`", "",
         marker(task.source_file, task.id),

@@ -18,7 +18,7 @@ _BULLET_KV = re.compile(r"^[-*]\s+([^:]+?)\s*:\s*(.*)$")
 _BULLET = re.compile(r"^[-*]\s+(?:\[[ xX]\]\s*)?(\S.*)$")
 _DESC = {"mo ta", "description"}
 _AC = {"tieu chi nghiem thu", "acceptance criteria"}
-_META_FIELDS = {"assignees", "collaborators", "labels", "github", "priority"}
+_META_FIELDS = {"assignees", "collaborators", "labels", "github", "priority", "epic", "depends"}
 
 Found = list[tuple[int, Task]]
 
@@ -223,6 +223,11 @@ def parse_tables(text: str, source_file: str) -> tuple[Found, list[Diagnostic]]:
                                     message="Bảng thiếu hoặc sai dòng phân cách (ví dụ |---|---|); hãy chuẩn hóa bảng."))  # fmt: skip
             continue
         width = len(header)
+        used = {i for f, i in cols.items() if f != "status"}
+        skipped = [h[:30] for i, h in enumerate(header) if i not in used]
+        if skipped:  # cột không nhận diện/không dùng: nói rõ, không bỏ im lặng
+            diags.append(Diagnostic(level="warning", code="UNKNOWN_COLUMN", line=start,
+                                    message=f"Bảng bỏ qua cột: {', '.join(repr(h) for h in skipped)}."))  # fmt: skip
         missing = [f for f in ("id", "title") if f not in cols]
         if missing:
             diags.append(Diagnostic(level="error", code="MISSING_COLUMN", line=start,
