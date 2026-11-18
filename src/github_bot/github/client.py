@@ -5,6 +5,7 @@ import re
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel
 
 from github_bot.identities.resolver import GITHUB_LOGIN
 
@@ -21,6 +22,13 @@ class GitHubError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class IssueRef(BaseModel):
+    number: int
+    state: str
+    url: str
+    body: str
 
 
 class GitHubClient:
@@ -61,7 +69,7 @@ class GitHubClient:
         self._http.close()
 
     # -- nội bộ ----------------------------------------------------------------------------
-    def _get(self, path: str, params: dict[str, int] | None = None) -> httpx.Response:
+    def _get(self, path: str, params: dict[str, int | str] | None = None) -> httpx.Response:
         """GET; chỉ trả 200/204/404. Mọi trạng thái khác -> GitHubError (fail closed). Không retry."""
         try:
             with self._http.stream("GET", path, params=params) as resp:
@@ -147,3 +155,23 @@ class GitHubClient:
             if len(items) < PER_PAGE:
                 return names
         raise GitHubError("TOO_MANY_PAGES", f"Hơn {self._max_pages} trang label; danh sách chưa đầy đủ.")
+
+    def list_issues(self, owner: str, repo: str) -> list[IssueRef]:
+        """GET /repos/{o}/{r}/issues?state=all (phân trang). Bỏ pull request (endpoint này trả cả PR).
+        Danh sách không đầy đủ (vượt max_pages) -> lỗi: không thể bảo đảm idempotency."""
+        path = f"{self._repo_path(owner, repo)}/issues"
+        out: list[IssueRef] = []
+        for page in range(1, self._max_pages + 1):
+            r = self._get(path, {"state": "all", "per_page": PER_PAGE, "page": page})
+            if r.status_code != 200:
+                raise GitHubError("NOT_FOUND", "Không đọc được danh sách issue.")
+            try:
+                items = r.json()
+                for i in items:
+                    if "pull_request" not in i:
+                        out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or ""))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise GitHubError("BAD_RESPONSE", "Phản hồi issue không hợp lệ.") from None
+            if len(items) < PER_PAGE:
+                return out
+        raise GitHubError("TOO_MANY_PAGES", f"Hơn {self._max_pages} trang issue; danh sách chưa đầy đủ.")

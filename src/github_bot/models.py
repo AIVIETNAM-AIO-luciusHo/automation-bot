@@ -27,6 +27,7 @@ class Diagnostic(BaseModel):
     code: str
     message: str
     line: int | None = None
+    task_id: str | None = None  # None = lỗi toàn cục (repo/mạng), ảnh hưởng mọi task
 
 
 class ParseResult(BaseModel):

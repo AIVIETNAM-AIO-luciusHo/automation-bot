@@ -5,8 +5,8 @@ from github_bot.identities.resolver import Resolved
 from github_bot.models import Diagnostic, Task
 
 
-def _err(code: str, msg: str) -> Diagnostic:
-    return Diagnostic(level="error", code=code, message=msg)
+def _err(code: str, msg: str, task_id: str | None = None) -> Diagnostic:
+    return Diagnostic(level="error", code=code, message=msg, task_id=task_id)
 
 
 def validate_against_github(
@@ -49,13 +49,13 @@ def validate_against_github(
                         diags.append(_err(e.code, f"{r.task_id}: kiểm tra assignee {login!r} thất bại: {e.message}"))
                         return diags
                 if not assignable[key]:
-                    diags.append(_err("NOT_ASSIGNABLE", f"{r.task_id}: {login!r} không thể được assign trong {shown}."))
+                    diags.append(_err("NOT_ASSIGNABLE", f"{r.task_id}: {login!r} không thể được assign trong {shown}.", r.task_id))
         if any(by_id[r.task_id].labels for r in ok):
             existing = client.label_names(owner, name)
             for r in ok:
                 for label in by_id[r.task_id].labels:
                     if label.casefold() not in existing:  # ensure_labels_exist=false: không tự tạo
-                        diags.append(_err("LABEL_MISSING", f"{r.task_id}: label {label[:50]!r} không tồn tại trong {shown}."))
+                        diags.append(_err("LABEL_MISSING", f"{r.task_id}: label {label[:50]!r} không tồn tại trong {shown}.", r.task_id))
     except GitHubError as e:  # lỗi hệ thống giữa chừng (mạng, 5xx, 401/403, rate limit): dừng, BLOCK
         diags.append(_err(e.code, f"{shown}: {e.message} Kết quả kiểm tra không đầy đủ."))
     return diags
