@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable
+from typing import Any
 
 import httpx
 
@@ -34,6 +35,9 @@ class FakeGitHub:
         assignee_status: dict[str, int] | None = None,
         permissions: object = DEFAULT_PERMS,
         issues: Iterable[dict[str, object]] = (),
+        on_post: Callable[[FakeGitHub, httpx.Request, int], httpx.Response | None] | None = None,
+        after_post: Callable[[FakeGitHub, int], None] | None = None,
+        drop_assignees: Iterable[str] = (),
         override: Callable[[httpx.Request], httpx.Response | None] | None = None,
     ) -> None:
         self.repo = repo
@@ -46,6 +50,10 @@ class FakeGitHub:
         self.assignee_status = {k.casefold(): v for k, v in (assignee_status or {}).items()}
         self.permissions = permissions
         self.issues = list(issues)
+        self.on_post = on_post
+        self.after_post = after_post
+        self.drop_assignees = {a.casefold() for a in drop_assignees}
+        self.posts: list[httpx.Request] = []
         self.override = override
         self.requests: list[httpx.Request] = []
         self.foreign: list[httpx.Request] = []
@@ -87,6 +95,8 @@ class FakeGitHub:
                 return resp
         path = request.url.path.rstrip("/")
         base = f"/repos/{self.repo}"
+        if request.method != "GET":
+            return self._write(request, path, base)
         if path.lower() == base.lower():
             return self._json(self.repo_status, self.repo_body, self.repo_json())
         if path.lower() == f"{base}/labels".lower() or path == "/repositories/1/labels":
@@ -105,6 +115,37 @@ class FakeGitHub:
         if body is not None or status != 200:
             return httpx.Response(status, json=body if body is not None else {"message": "err"})
         return httpx.Response(status, json=default)
+
+    def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Server-side create with GitHub semantics: unassignable logins are DROPPED silently."""
+        number = max((int(str(i["number"])) for i in self.issues), default=0) + 1
+        want = [str(a) for a in payload.get("assignees", [])]
+        got = [a for a in want if a.casefold() in self.assignees and a.casefold() not in self.drop_assignees]
+        item = make_issue(number, str(payload.get("body", "")), title=str(payload.get("title", "")))
+        item["labels"] = [{"name": str(n)} for n in payload.get("labels", [])]
+        item["assignees"] = [{"login": a} for a in got]
+        self.issues.append(item)
+        return item
+
+    def _write(self, request: httpx.Request, path: str, base: str) -> httpx.Response:
+        if request.method != "POST" or path.lower() != f"{base}/issues".lower():
+            return httpx.Response(405, json={"message": "Method Not Allowed"})
+        self.posts.append(request)
+        n = len(self.posts)
+        if self.on_post is not None:
+            resp = self.on_post(self, request, n)
+            if resp is not None:
+                return resp
+        try:
+            payload = json.loads(request.content or b"{}")
+        except ValueError:
+            return httpx.Response(400, json={"message": "Problems parsing JSON"})
+        if not isinstance(payload, dict) or not str(payload.get("title", "")).strip():
+            return httpx.Response(422, json={"message": "Validation Failed"})
+        item = self.create(payload)
+        if self.after_post is not None:
+            self.after_post(self, n)
+        return httpx.Response(201, json=item)
 
     def _issues(self, request: httpx.Request) -> httpx.Response:
         """GitHub semantics: default state=open (so a client that forgets state=all misses closed
@@ -149,13 +190,16 @@ def make_issue(
     return item
 
 
-def assert_requests_safe(fake: FakeGitHub, token: str = TOKEN) -> None:
+def assert_requests_safe(fake: FakeGitHub, token: str = TOKEN, *, allow_post: bool = False) -> None:
     """Invariants for EVERY request any test causes: read-only, https, pinned host, no traversal."""
     for r in fake.requests:
         if r.url.host == HOST:
-            assert r.method == "GET", f"non-GET request: {r.method} {r.url}"
+            if allow_post and r.method == "POST":
+                assert r.url.path.rstrip("/") == "/repos/owner/repo/issues", f"POST elsewhere: {r.url}"
+            else:
+                assert r.method == "GET", f"non-GET request: {r.method} {r.url}"
             assert r.url.scheme == "https", r.url
-            assert r.content == b"", "GET with a body"
+            assert r.method == "POST" or r.content == b"", "GET with a body"
             raw = r.url.raw_path.decode("ascii", "replace").lower()
             assert "%2e" not in raw and "%2f" not in raw and "%5c" not in raw, raw
             segs = r.url.path.split("/")
