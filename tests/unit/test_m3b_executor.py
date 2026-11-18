@@ -1015,3 +1015,16 @@ def test_no_new_write_path_exists_besides_create_issue() -> None:
     assert isinstance(arg, ast.Constant) and arg.value == "POST"
     text = "\n".join(p.read_text(encoding="utf-8") for p in sorted(SRC.rglob("*.py")))
     assert len(re.findall(r"_request\(\s*['\"](?!GET)", text)) == 1
+
+
+def test_ctrl_c_during_the_pre_post_checks_means_zero_posts_and_a_clean_message(env, capsys) -> None:
+    def boom(req: httpx.Request) -> httpx.Response | None:
+        if req.method == "GET" and req.url.path.endswith("/labels"):
+            raise KeyboardInterrupt
+        return None
+
+    make_plan(env, capsys)
+    env.fake.override = boom
+    rc, out = apply(env, capsys)
+    assert rc != 0 and out.strip() and "Traceback" not in out
+    no_posts(env)
