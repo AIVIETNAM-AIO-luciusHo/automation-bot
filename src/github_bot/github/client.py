@@ -48,6 +48,7 @@ class GitHubClient:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
+                "Accept-Encoding": "identity",  # JSON nhỏ; tránh gzip bomb giải nén cả chunk trước khi kiểm ngưỡng
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "github-automation-bot",
             },
