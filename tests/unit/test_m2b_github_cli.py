@@ -537,7 +537,6 @@ def test_plain_403_without_rate_limit_headers_is_a_permission_block(gh, capsys) 
 
 # ---- hardening round: oversized bodies, label list too long, control chars in --repo ---------
 
-@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
 def test_oversized_response_body_is_not_accepted(gh, capsys) -> None:
     pad = b"x" * 20_000_000  # a real repo JSON is ~5 KB; anything this big must be refused
 
@@ -552,7 +551,6 @@ def test_oversized_response_body_is_not_accepted(gh, capsys) -> None:
     assert rc != 0 and out.strip(), "20 MB repo response must be BLOCKed (response size cap)"
 
 
-@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
 def test_oversized_label_page_is_not_accepted(gh, capsys) -> None:
     def big(req: httpx.Request) -> httpx.Response | None:
         if req.url.path.endswith("/labels"):

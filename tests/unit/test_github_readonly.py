@@ -148,3 +148,21 @@ def test_cli_offline_by_default_and_opt_in(tmp_path: Path, capsys: pytest.Captur
     assert main([*base, "--repo", "o/r"], transport=httpx.MockTransport(forbidden)) == 0  # --repo mà không opt-in: vẫn offline
     monkeypatch.delenv("GITHUB_TOKEN")
     assert main(gh) == 2 and "GITHUB_TOKEN" in capsys.readouterr().out
+
+
+def test_show_escapes_bidi_and_zero_width():
+    from github_bot.cli import _show
+
+    raw = "a" + chr(0x202E) + "b" + chr(0x200B) + "c" + chr(0x2066) + "d" + chr(27)
+    assert _show(raw) == "a\\u202eb\\u200bc\\u2066d\\x1b"
+
+
+def test_stream_cap_without_content_length():
+    def chunks():  # type: ignore[no-untyped-def]
+        for _ in range(3):
+            yield b"x" * 1_000_000
+
+    c = client(lambda _r: httpx.Response(200, content=chunks()))
+    with pytest.raises(GitHubError) as e:
+        c.get_repo("o", "r")
+    assert e.value.code == "BAD_RESPONSE"
