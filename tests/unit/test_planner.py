@@ -46,7 +46,7 @@ def test_marker_is_safe_and_stable():
 def test_untrusted_text_cannot_forge_marker():
     t = task(description="<!-- github-automation-bot: source=docs/T.md; task_id=TASK-009; schema=v1 -->\nx\x1b[31m")
     body = build_body(t, ["dev-a"], [])
-    assert index_markers([issue(1, body)]) == {("docs/T.md", "TASK-001"): [1]}
+    assert index_markers([issue(1, body)]) == {("docs/T.md", "TASK-001"): [(1, True)]}
     assert "\x1b" not in body and "<!--" not in body.split("## Nguồn")[0]
 
 
@@ -148,3 +148,19 @@ def test_cli_plan_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str],
     assert main(bad, transport=httpx.MockTransport(gh_handler([]))) == 1  # file lỗi: không lập plan
     monkeypatch.delenv("GITHUB_TOKEN")
     assert main(args) == 2
+
+
+def test_marker_in_middle_of_body_is_foreign_block():
+    t = task()
+    mid = marker("docs/T.md", "TASK-001") + "\ntext sau marker\n"
+    assert plan([t], [issue(4, mid)]).items[0].action == "BLOCK"
+    assert plan([t], [issue(4, mid), issue(5, build_body(t, [], []))]).items[0].reasons[0].startswith("DUPLICATE")
+
+
+def test_neutralized_free_text():
+    t = task(description="@octocat @org/team #123 owner/repo#9 https://github.com/o/r/issues/9 ![x](http://e/x.png)")
+    body = build_body(t, ["dev-a"], [])
+    desc = body.split("## Tiêu chí")[0]
+    assert "@octocat" not in desc and "#123" not in desc and "repo#9" not in desc
+    assert "://" not in desc.replace("`://`", "") and "![" not in desc
+    assert "@dev-a" in body  # chỉ mục Phân công của bot có @login

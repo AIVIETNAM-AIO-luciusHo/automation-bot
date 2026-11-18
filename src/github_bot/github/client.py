@@ -2,10 +2,11 @@
 
 import os
 import re
+from typing import Any
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from github_bot.identities.resolver import GITHUB_LOGIN
 
@@ -22,6 +23,14 @@ class GitHubError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _list_of_dicts(r: httpx.Response) -> list[dict[str, Any]]:
+    """Endpoint danh sách phải trả JSON list các object; `{}`/null/chuỗi/`[{}]`-sai-kiểu là phản hồi hỏng."""
+    data = r.json()
+    if not isinstance(data, list) or not all(isinstance(i, dict) for i in data):
+        raise TypeError("không phải list các object")
+    return data
 
 
 class IssueRef(BaseModel):
@@ -147,7 +156,7 @@ class GitHubClient:
             if r.status_code != 200:
                 raise GitHubError("NOT_FOUND", "Không đọc được danh sách label.")
             try:
-                items = r.json()
+                items = _list_of_dicts(r)
                 batch = [str(i["name"]) for i in items]
             except (ValueError, TypeError, KeyError):
                 raise GitHubError("BAD_RESPONSE", "Phản hồi label không hợp lệ.") from None
@@ -166,11 +175,11 @@ class GitHubClient:
             if r.status_code != 200:
                 raise GitHubError("NOT_FOUND", "Không đọc được danh sách issue.")
             try:
-                items = r.json()
+                items = _list_of_dicts(r)
                 for i in items:
                     if "pull_request" not in i:
                         out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or ""))
-            except (ValueError, TypeError, KeyError, AttributeError):
+            except (ValueError, TypeError, KeyError, ValidationError):
                 raise GitHubError("BAD_RESPONSE", "Phản hồi issue không hợp lệ.") from None
             if len(items) < PER_PAGE:
                 return out

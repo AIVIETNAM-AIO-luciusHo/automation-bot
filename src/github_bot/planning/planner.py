@@ -48,9 +48,24 @@ def marker(source_file: str, task_id: str) -> str:
     return f"<!-- github-automation-bot: source={quote(source_file, safe='/._-')}; task_id={task_id}; schema=v1 -->"
 
 
+# Tách ký hiệu khỏi phần còn lại bằng ranh giới inline-code để không còn @mention / #ref / URL / ảnh.
+# shortcut: dựa vào việc bộ nhận diện mention/autolink làm việc trên chuỗi liền; docs GitHub không nói rõ,
+# chưa kiểm chứng trên GitHub thật -> kiểm ở E2E sandbox trước khi tin hoàn toàn.
+_NEUTRALIZE = (
+    (re.compile(r"@(?=[A-Za-z0-9])"), "`@`"),
+    (re.compile(r"#(?=[0-9])"), "`#`"),
+    (re.compile(r"://"), "`://`"),
+    (re.compile(r"!\["), "`!`["),
+)
+
+
 def _text(s: str) -> str:
-    """Dữ liệu không đáng tin: bỏ ký tự điều khiển, vô hiệu hóa '<' để không giả marker/HTML."""
-    return _CTRL.sub(" ", s).replace("<", "&lt;")
+    """Dữ liệu không đáng tin: bỏ ký tự điều khiển, '<' -> &lt; (không giả marker/HTML), vô hiệu hóa
+    @mention, #N / owner/repo#N, URL (autolink) và ảnh ngoài. Chỉ mục Phân công do bot sinh mới có @login."""
+    s = _CTRL.sub(" ", s).replace("<", "&lt;")
+    for rx, repl in _NEUTRALIZE:
+        s = rx.sub(repl, s)
+    return s
 
 
 def build_body(task: Task, assignees: list[str], collaborators: list[str]) -> str:
@@ -69,12 +84,16 @@ def build_body(task: Task, assignees: list[str], collaborators: list[str]) -> st
     return "\n".join(lines) + "\n"
 
 
-def index_markers(issues: list[IssueRef]) -> dict[tuple[str, str], list[int]]:
-    """(source đã encode, task_id) -> số issue; mỗi lần xuất hiện marker là một dấu vết."""
-    hits: dict[tuple[str, str], list[int]] = {}
+def index_markers(issues: list[IssueRef]) -> dict[tuple[str, str], list[tuple[int, bool]]]:
+    """(source đã encode, task_id) -> [(số issue, marker có phải DÒNG CUỐI)]. Mỗi lần xuất hiện là một dấu vết;
+    marker của bot luôn ở dòng cuối, marker giữa body (do người khác viết/trích) bị đánh dấu False."""
+    hits: dict[tuple[str, str], list[tuple[int, bool]]] = {}
     for i in issues:
-        for src, tid in _MARKER.findall(i.body):
-            hits.setdefault((src, tid.upper()), []).append(i.number)
+        lines = i.body.rstrip().splitlines()
+        for n, line in enumerate(lines):
+            for src, tid in _MARKER.findall(line):
+                last = n == len(lines) - 1 and _MARKER.fullmatch(line.strip()) is not None
+                hits.setdefault((src, tid.upper()), []).append((i.number, last))
     return hits
 
 
@@ -118,12 +137,14 @@ def build_plan(
         if reasons:
             action = "BLOCK"
         elif len(found) > 1:
-            action, reasons = "BLOCK", [f"DUPLICATE_MARKER: marker trùng ở issue {sorted(set(found))}"]
+            action, reasons = "BLOCK", [f"DUPLICATE_MARKER: marker trùng ở issue {sorted({n for n, _ in found})}"]
+        elif found and not found[0][1]:
+            action, reasons = "BLOCK", [f"FOREIGN_MARKER: marker nằm giữa body issue #{found[0][0]}, không phải của bot"]
         elif found:
-            action, number, reasons = "SKIP", found[0], ["EXISTS: issue đã có (UPDATE thuộc M4)"]
+            action, number, reasons = "SKIP", found[0][0], ["EXISTS: issue đã có (UPDATE thuộc M4)"]
         body = build_body(t, r.assignees, r.collaborators) if action != "BLOCK" else ""
         items.append(PlanItem(
-            task_id=t.id, action=action, title=_CTRL.sub(" ", t.title).strip(), body=body,
+            task_id=t.id, action=action, title=_text(t.title).strip(), body=body,
             assignees=r.assignees if action != "BLOCK" else [], labels=t.labels if action != "BLOCK" else [],
             issue_number=number, reasons=reasons,
         ))  # fmt: skip
