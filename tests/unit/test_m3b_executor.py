@@ -642,3 +642,206 @@ def test_audit_log_is_appended_not_truncated_and_refusals_keep_it(env, capsys) -
     assert rc2 != 0
     after = log.read_text(encoding="utf-8")
     assert after.startswith(before), "audit history was truncated/rewritten"
+
+
+# ---- round 2: self-critique probes (first real write path) ---------------------------------------------
+
+def test_audit_path_that_cannot_be_written_is_refused_before_any_post(env, capsys) -> None:
+    plan = make_plan(env, capsys)
+    victim = env.tmp / "victim.txt"
+    victim.write_text("precious", encoding="utf-8")
+    (env.ws / "out" / f"audit-{plan['plan_sha256'][:8]}.jsonl").symlink_to(victim)
+    rc, out = apply(env, capsys)
+    assert rc != 0 and out.strip()
+    assert victim.read_text(encoding="utf-8") == "precious"
+    no_posts(env)  # refusing AFTER creating issues would leave them unlogged and mislabelled "refused"
+
+
+def test_audit_path_being_a_directory_is_refused_before_any_post(env, capsys) -> None:
+    plan = make_plan(env, capsys)
+    (env.ws / "out" / f"audit-{plan['plan_sha256'][:8]}.jsonl").mkdir()
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    no_posts(env)
+
+
+def test_unexpected_crash_mid_run_still_reports_and_logs_the_issues_already_created(env, capsys) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n == 3:
+            raise RuntimeError("unexpected bug in transport/handler")
+        return None
+
+    plan = make_plan(env, capsys)
+    env.fake.on_post = hook
+    try:
+        rc, out = apply(env, capsys)
+    except RuntimeError:
+        rc, out = 99, "RuntimeError escaped"
+    created = sorted(set(markers_in_store(env.fake)))
+    assert created, "setup: some issues were created before the crash"
+    log = env.ws / "out" / f"audit-{plan['plan_sha256'][:8]}.jsonl"
+    logged = {json.loads(ln)["task_id"] for ln in log.read_text(encoding="utf-8").splitlines()} if log.is_file() else set()
+    assert set(created) <= logged, f"created {created} but audit only has {sorted(logged)} (audit must be flushed per task)"
+    assert rc not in (0, 99) and "Traceback" not in out
+
+
+@pytest.mark.parametrize("task_id", ["bad id", "TASK-001\n", "x" * 100, "ünï-1", "T-1; drop"])
+def test_self_consistent_plan_with_malformed_task_id_is_refused_cleanly(env, capsys, task_id) -> None:
+    plan = make_plan(env, capsys)
+    it = plan["items"][0]
+    old = it["task_id"]
+    it["task_id"] = task_id
+    it["body"] = it["body"].replace(f"task_id={old}", f"task_id={task_id}")
+    write_plan(env, plan, rehash=True)
+    rc, out = apply(env, capsys)
+    assert rc != 0 and "Traceback" not in out
+    no_posts(env)
+
+
+@pytest.mark.parametrize("field", ["title"])
+@pytest.mark.parametrize("bad", ["a\u202eb", "a\u200bb", "x\u2066y"])
+def test_bidi_or_zero_width_in_a_self_consistent_plan_is_refused(env, capsys, field, bad) -> None:
+    plan = make_plan(env, capsys)
+    if field == "title":
+        plan["items"][0]["title"] = "Việc " + bad
+    else:
+        plan["items"][0]["labels"] = [bad]
+    write_plan(env, plan, rehash=True)
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    no_posts(env)
+
+
+def test_second_marker_in_a_valid_looking_body_is_refused(env, capsys) -> None:
+    plan = make_plan(env, capsys)
+    it = plan["items"][0]
+    it["body"] = it["body"].replace("## Mô tả", "## Mô tả\n<!-- github-automation-bot: source=TASKS.md; task_id=TASK-002; schema=v1 -->", 1)
+    write_plan(env, plan, rehash=True)
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    no_posts(env)
+
+
+def test_marker_of_another_task_on_the_last_line_is_refused(env, capsys) -> None:
+    plan = make_plan(env, capsys)
+    it = plan["items"][0]
+    it["body"] = it["body"].replace("task_id=TASK-001", "task_id=TASK-002")
+    write_plan(env, plan, rehash=True)
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    no_posts(env)
+
+
+@pytest.mark.parametrize("variant", ["upper", "padded", "newline", "prefix_0x", "short"])
+def test_approve_hash_must_be_exactly_the_lowercase_hex_digest(env, capsys, variant) -> None:
+    plan = make_plan(env, capsys)
+    h = plan["plan_sha256"]
+    bad = {"upper": h.upper(), "padded": f" {h} ", "newline": h + "\n", "prefix_0x": "0x" + h, "short": h[:63]}[variant]
+    rc, _ = apply(env, capsys, h=bad)
+    assert rc != 0
+    no_posts(env)
+
+
+def test_skip_only_plan_posts_nothing_and_succeeds(env, capsys) -> None:
+    make_plan(env, capsys)
+    assert apply(env, capsys)[0] == 0
+    plan2 = make_plan(env, capsys, fake=env.fake)
+    assert {i["action"] for i in plan2["items"]} == {"SKIP"}
+    before = len(env.fake.posts)
+    rc, out = apply(env, capsys)
+    assert len(env.fake.posts) == before and rc in (0, 2), out
+
+
+def test_mixed_skip_and_create_plan_creates_only_the_missing_ones(env, capsys) -> None:
+    fake = FakeGitHub(issues=[make_issue(1, "x\n\n<!-- github-automation-bot: source=TASKS.md; task_id=TASK-001; schema=v1 -->\n")])
+    plan = make_plan(env, capsys, fake=fake)
+    assert [i["action"] for i in plan["items"]].count("SKIP") == 1
+    rc, out = apply(env, capsys)
+    assert rc == 0, out
+    assert len(env.fake.posts) == 4 and markers_in_store(env.fake).count("TASK-001") == 1
+
+
+@pytest.mark.parametrize("val", [None, "x", 3])
+def test_null_or_wrong_type_labels_and_assignees_in_plan_are_refused(env, capsys, val) -> None:
+    plan = make_plan(env, capsys)
+    plan["items"][0]["labels"] = val
+    plan["items"][1]["assignees"] = val
+    write_plan(env, plan, rehash=True)
+    rc, out = apply(env, capsys)
+    assert rc != 0 and "Traceback" not in out
+    no_posts(env)
+
+
+def test_unknown_extra_fields_in_plan_are_refused(env, capsys) -> None:
+    plan = make_plan(env, capsys)
+    plan["items"][0]["state"] = "closed"
+    write_plan(env, plan, rehash=True)
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    no_posts(env)
+
+
+@pytest.mark.parametrize("ra", ["-5", "abc", "0", "61", "60", "1e9", "nan", "inf", "Wed, 21 Oct 2026 07:28:00 GMT", ""])
+def test_retry_after_oddities_never_cause_long_sleeps_or_unbounded_posts(env, capsys, ra) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n >= 2:
+            return httpx.Response(429, headers={"Retry-After": ra}, json={"message": "slow"})
+        return None
+
+    make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, _ = apply(env, capsys)
+    assert rc != 0
+    assert max(env.sleeps, default=0) <= 60 and len(env.sleeps) <= 8
+    assert len(env.fake.posts) <= 1 + 3 * 4
+
+
+def test_assignee_case_difference_in_the_response_is_not_a_mismatch(env, capsys) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        payload = json.loads(req.content)
+        item = fake.create(payload)
+        item["assignees"] = [{"login": a["login"].upper()} for a in item["assignees"]]
+        return httpx.Response(201, json=item)
+
+    make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    assert rc == 0, out
+
+
+@pytest.mark.parametrize("assignees", [None, "oops", [None], [{"nologin": 1}]], ids=["null", "string", "null_item", "no_login"])
+def test_malformed_assignees_in_the_create_response_are_reported_not_crashing(env, capsys, assignees) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        item = fake.create(json.loads(req.content))
+        item["assignees"] = assignees
+        return httpx.Response(201, json=item)
+
+    make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    assert "Traceback" not in out
+    assert rc != 0, "assignees could not be confirmed -> must not look like success"
+
+
+def test_output_never_echoes_raw_control_or_bidi_characters_from_plan_or_server(env, capsys) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n == 1:
+            return httpx.Response(422, json={"message": "bad \x1b[31m \u202e"})
+        return None
+
+    plan = make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    assert rc != 0
+    assert not [c for c in out if (ord(c) < 32 and c != "\n") or 0x7F <= ord(c) < 0xA0 or c in "\u202e\u2066\u200b"]
+    assert plan
+
+
+def test_no_test_in_the_suite_can_reach_the_real_github() -> None:
+    root = Path(__file__).resolve().parent
+    for f in root.glob("test_*.py"):
+        text = f.read_text(encoding="utf-8")
+        if f.name == Path(__file__).name:
+            continue  # this guard names the patterns it forbids
+        assert "socket.create_connection" not in text and "urllib.request" not in text, f.name
+        assert "httpx.get(" not in text and "httpx.post(" not in text and "requests." not in text, f.name

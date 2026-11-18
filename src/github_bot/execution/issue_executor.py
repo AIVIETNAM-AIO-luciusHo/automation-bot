@@ -4,6 +4,7 @@ Mọi cổng kiểm tra chạy TRƯỚC khi có POST đầu tiên; từ chối =
 state, không comment, không theo redirect (kế thừa từ client đọc)."""
 
 import json
+import os
 import re
 import time
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from github_bot.github.client import GitHubClient, GitHubError, IssueRef
+from github_bot.github.client import GitHubClient, GitHubError, IssueRef, _logins
 from github_bot.github.validator import validate_against_github
 from github_bot.identities.resolver import GITHUB_LOGIN, Resolved
 from github_bot.markdown.loader import LoaderError, read_workspace_file
@@ -23,7 +24,9 @@ MAX_ITEMS = 50
 MAX_ATTEMPTS = 3  # số lần thử POST mỗi task khi bị rate-limit
 MAX_SLEEP = 60.0
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
-_CTRL = re.compile("[\\x00-\\x1f\\x7f-\\x9f]")
+# C0/C1 + bidi/zero-width (cùng bộ với cli._CTRL)
+_CTRL = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069]")
+_TASK_ID = re.compile(r"[A-Za-z]+-?[0-9]+")  # cùng dạng với models.Task.id
 
 
 class ApplyRejected(Exception):
@@ -39,7 +42,7 @@ class IssueWriter(GitHubClient):
             data = r.json()
             if not isinstance(data, dict) or not isinstance(data["number"], int) or not isinstance(data["html_url"], str):
                 raise TypeError
-            logins = [str(a["login"]) for a in data.get("assignees") or []]
+            logins = _logins(data.get("assignees"))
         except (ValueError, TypeError, KeyError):
             raise GitHubError("BAD_RESPONSE", "Phản hồi tạo issue không hợp lệ; kiểm tra thủ công.", 201) from None
         return {"number": data["number"], "url": data["html_url"], "assignees": logins}
@@ -63,6 +66,8 @@ def load_plan(path: str, workspace: str | Path, approve_hash: str) -> Plan:
         raise ApplyRejected("Hash không khớp nội dung plan (plan bị sửa hoặc hash sai); hãy chạy lại `issues plan`.")
     if not plan.items or len(plan.items) > MAX_ITEMS:
         raise ApplyRejected(f"Plan phải có 1..{MAX_ITEMS} item.")
+    if not all(len(i.task_id) <= 64 and _TASK_ID.fullmatch(i.task_id) for i in plan.items):
+        raise ApplyRejected("Plan có task_id sai định dạng.")
     if len({i.task_id.upper() for i in plan.items}) != len(plan.items):
         raise ApplyRejected("Plan có task_id trùng.")
     for i in plan.items:
@@ -84,7 +89,10 @@ def load_plan(path: str, workspace: str | Path, approve_hash: str) -> Plan:
 def _revalidate(client: IssueWriter, plan: Plan) -> list[IssueRef]:
     """Plan cũ? Kiểm lại repo/quyền/assignee/label (validator M2b) và marker đã có. Trả danh sách issue."""
     create = [i for i in plan.items if i.action == "CREATE"]
-    tasks = [Task(id=i.task_id, title=i.title, labels=i.labels, source_file=plan.source_file, source_reference=i.task_id) for i in create]
+    try:
+        tasks = [Task(id=i.task_id, title=i.title, labels=i.labels, source_file=plan.source_file, source_reference=i.task_id) for i in create]
+    except ValidationError:
+        raise ApplyRejected("Plan có item không hợp lệ (id/title/label).") from None
     resolved = [Resolved(task_id=i.task_id, assignees=i.assignees) for i in create]
     diags = validate_against_github(client, plan.repo, tasks, resolved)
     if diags:
@@ -121,31 +129,53 @@ def apply_plan(
         raise ApplyRejected(e.message) from None
     owner, _, name = plan.repo.partition("/")
     audit = (Path(workspace).resolve() / plan_path).resolve().parent / f"audit-{approve_hash[:8]}.jsonl"
+    _preflight_audit(audit)  # trước POST đầu tiên: không thể để issue tạo xong mà không ghi được audit
     lines: list[str] = []
     failed = 0
     try:
         _revalidate(client, plan)
-        rows: list[dict[str, object]] = []
-        for it in plan.items:
-            base: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat(timespec="seconds"), "task_id": it.task_id}
-            if it.action != "CREATE":
-                rows.append({**base, "action": "skip_existing", "issue_number": it.issue_number})
-                lines.append(f"SKIPPED {it.task_id} (đã có issue #{it.issue_number})")
-                continue
-            row = _create_one(client, plan, it, owner, name)
-            row = {**base, **row}
-            rows.append(row)
-            ok = row["action"] in ("created", "created_recovered") and "error" not in row
-            failed += not ok
-            lines.append(_line(row))
-        _append_audit(audit, rows)
+        try:
+            log = audit.open("a", encoding="utf-8")
+        except OSError:
+            raise ApplyRejected("Không mở được file audit để ghi.") from None
+        with log:
+            stop = ""
+            for it in plan.items:
+                base: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat(timespec="seconds"), "task_id": it.task_id}
+                if stop:
+                    row: dict[str, object] = {"action": "not_attempted", "error": stop}
+                elif it.action != "CREATE":
+                    row = {"action": "skip_existing", "issue_number": it.issue_number}
+                else:
+                    try:
+                        row = _create_one(client, plan, it, owner, name)
+                    except KeyboardInterrupt:
+                        row, stop = {"action": "error", "error": "INTERRUPTED: bị ngắt giữa chừng, kết quả task này không rõ; chạy lại `issues plan`"}, "bị ngắt (Ctrl-C)"
+                    except Exception as e:  # noqa: BLE001 - bug/transport lạ: dừng sạch, vẫn báo và ghi audit những gì đã làm
+                        row, stop = {"action": "error", "error": f"UNEXPECTED: {type(e).__name__}; kết quả task này không rõ, chạy lại `issues plan`"}, "dừng sau lỗi bất ngờ"
+                row = {**base, **row}
+                log.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                log.flush()  # mỗi task một dòng, ngay lập tức
+                ok = row["action"] in ("created", "created_recovered", "skip_existing") and "error" not in row
+                failed += not ok
+                lines.append(_line(row))
     finally:
         client.close()
     return (1 if failed else 0), lines
 
 
+def _preflight_audit(path: Path) -> None:
+    if path.is_symlink() or path.is_dir():
+        raise ApplyRejected("File audit là symlink/thư mục, từ chối (chưa tạo issue nào).")
+    target = path if path.exists() else path.parent
+    if not os.access(target, os.W_OK):
+        raise ApplyRejected("Không ghi được file audit, từ chối (chưa tạo issue nào).")
+
+
 def _line(row: dict[str, object]) -> str:
     tid, act = row["task_id"], row["action"]
+    if act == "skip_existing":
+        return f"SKIPPED {tid} (đã có issue #{row.get('issue_number')})"
     if row.get("error"):
         return f"ERROR {tid} [{act}] {row['error']}" + (f" (HTTP {row['status']})" if row.get("status") else "")
     return f"CREATED {tid} #{row['issue_number']} {row['url']}" if act != "created_recovered" else f"CREATED {tid} #{row['issue_number']} (khôi phục sau lỗi mạng) {row['url']}"
@@ -173,19 +203,26 @@ def _create_one(client: IssueWriter, plan: Plan, it: Any, owner: str, name: str)
                 except GitHubError:
                     found = None
                 if found:
-                    return {"action": "created_recovered", "issue_number": found.number, "url": found.url, "assignees": it.assignees}
+                    rec: dict[str, object] = {"action": "created_recovered", "issue_number": found.number, "url": found.url, "assignees": found.assignees}
+                    if (bad := _assignee_error(it, found.assignees)):
+                        rec["error"] = bad
+                    return rec
+                if e.code in ("NETWORK", "BAD_RESPONSE"):
+                    return {"action": "error", "status": e.status, "error": f"{e.code}: kết quả không rõ, issue có thể đã được tạo; chạy lại `issues plan` trước khi làm gì tiếp"}
             return {"action": "error", "error": f"{e.code}: {e.message}", "status": e.status}
         row: dict[str, object] = {"action": "created", "issue_number": got["number"], "url": got["url"], "assignees": got["assignees"]}
-        lost = [a for a in it.assignees if a.casefold() not in {x.casefold() for x in got["assignees"]}]
-        if lost:  # GitHub bỏ assignee im lặng: báo, không xóa/sửa issue
-            row["error"] = f"ASSIGNEE_MISMATCH: GitHub không gán {lost} cho {it.task_id}"
+        if (bad := _assignee_error(it, got["assignees"])):  # báo, không xóa/sửa issue
+            row["error"] = bad
         return row
     return {"action": "error", "error": "RATE_LIMITED: hết số lần thử", "status": 429}
 
 
-def _append_audit(path: Path, rows: list[dict[str, object]]) -> None:
-    if path.is_symlink() or path.is_dir():
-        raise ApplyRejected("File audit là symlink/thư mục, từ chối ghi.")
-    with path.open("a", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
+def _assignee_error(it: Any, actual: list[str] | None) -> str | None:
+    """Assignee thực tế phải đúng bằng yêu cầu: thiếu (GitHub bỏ im lặng), thừa hoặc không xác minh được -> lỗi."""
+    if actual is None:
+        return f"ASSIGNEE_UNVERIFIED: không xác minh được assignee của {it.task_id}"
+    want, got = {a.casefold(): a for a in it.assignees}, {a.casefold(): a for a in actual}
+    lost, extra = [want[k] for k in want if k not in got], [got[k] for k in got if k not in want]
+    if lost or extra:
+        return f"ASSIGNEE_MISMATCH: {it.task_id} thiếu {lost} thừa {extra}"
+    return None

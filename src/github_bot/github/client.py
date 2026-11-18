@@ -41,6 +41,13 @@ class IssueRef(BaseModel):
     state: str
     url: str
     body: str
+    assignees: list[str] | None = None  # None = thiếu/không đọc được -> không xác minh được
+
+
+def _logins(raw: object) -> list[str] | None:
+    if not isinstance(raw, list) or not all(isinstance(a, dict) and isinstance(a.get("login"), str) for a in raw):
+        return None
+    return [a["login"] for a in raw]
 
 
 class GitHubClient:
@@ -206,7 +213,7 @@ class GitHubClient:
                 items = _list_of_dicts(r)
                 for i in items:
                     if "pull_request" not in i:
-                        out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or ""))
+                        out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or "", assignees=_logins(i.get("assignees"))))
             except (ValueError, TypeError, KeyError, ValidationError):
                 raise GitHubError("BAD_RESPONSE", "Phản hồi issue không hợp lệ.") from None
             if len(items) < PER_PAGE:
