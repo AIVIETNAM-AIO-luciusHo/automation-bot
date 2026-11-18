@@ -17,6 +17,8 @@ class Task(BaseModel):
     github: list[str] = []
     priority: Priority | None = None
     labels: list[str] = []
+    epic: str = Field(default="", max_length=100)  # vào body, KHÔNG thành label (bot không tự tạo label)
+    dependencies: list[str] = []
     acceptance_criteria: list[str] = []
     source_file: str
     source_reference: str

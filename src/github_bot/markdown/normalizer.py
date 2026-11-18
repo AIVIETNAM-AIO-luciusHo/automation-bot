@@ -18,16 +18,18 @@ _ALIASES = {
     "assignees": ["phu trach", "nguoi phu trach", "owner", "assignee"],
     "collaborators": ["phoi hop", "reviewer", "ho tro"],
     "description": ["mo ta", "noi dung", "noi dung thuc hien", "description"],
-    "acceptance": ["tieu chi nghiem thu", "dau ra", "deliverables", "acceptance criteria"],
+    "acceptance": ["tieu chi nghiem thu", "dau ra", "deliverables", "deliverable", "acceptance criteria"],
     "labels": ["labels", "nhan", "module"],
     "priority": ["uu tien", "priority"],
     "github": ["github"],
+    "epic": ["epic"],
+    "depends": ["phu thuoc", "depends on", "dependencies"],
     "status": ["trang thai", "status"],  # nhận diện để bỏ qua, schema chưa dùng
 }
 _FIELD_BY_ALIAS = {a: f for f, names in _ALIASES.items() for a in names}
 _PRIORITY: dict[str, Priority] = {
     "high": "high", "cao": "high", "medium": "medium", "trung binh": "medium",
-    "low": "low", "thap": "low",
+    "low": "low", "thap": "low", "p0": "high", "p1": "medium", "p2": "low",
 }  # fmt: skip
 _BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
@@ -73,6 +75,8 @@ def build_task(
             github=github,
             priority=priority,
             labels=split_list(fields.get("labels", "")),
+            epic=" ".join(fields.get("epic", "").split()),
+            dependencies=[d for d in split_list(fields.get("depends", "")) if d not in ("—", "-", "–")],
             acceptance_criteria=acceptance,
             source_file=source_file,
             source_reference=task_id_full,
