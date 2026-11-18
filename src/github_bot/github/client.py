@@ -212,8 +212,10 @@ class GitHubClient:
             try:
                 items = _list_of_dicts(r)
                 for i in items:
-                    if "pull_request" not in i:
-                        out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or "", assignees=_logins(i.get("assignees"))))
+                    pull_request = i.get("pull_request")
+                    if isinstance(pull_request, dict) and pull_request:
+                        continue
+                    out.append(IssueRef(number=i["number"], state=i["state"], url=i["html_url"], body=i.get("body") or "", assignees=_logins(i.get("assignees"))))
             except (ValueError, TypeError, KeyError, ValidationError):
                 raise GitHubError("BAD_RESPONSE", "Phản hồi issue không hợp lệ.") from None
             if len(items) < PER_PAGE:

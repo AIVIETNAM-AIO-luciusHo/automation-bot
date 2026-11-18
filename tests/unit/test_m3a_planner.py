@@ -628,13 +628,15 @@ def test_free_text_cannot_ping_people_or_cross_reference_issues(gh, capsys) -> N
     assert not re.search(r"(?<![\w`\\&])#\d+", free + it["title"]), "bare #N reference in free text"
 
 
-@pytest.mark.parametrize("val", [None, False], ids=["null", "false"])
-@pytest.mark.xfail(strict=True, reason="M3a gap (low): `pull_request: null/false` is treated as a PR and dropped, hiding a marker -> possible duplicate")
-def test_non_object_pull_request_key_does_not_hide_an_issue(gh, capsys, val) -> None:
+@pytest.mark.parametrize(
+    "val", [None, False, {}, "", 0], ids=["null", "false", "empty_dict", "empty_string", "zero"]
+)
+def test_pull_request_without_nonempty_object_keeps_issue_marker(gh, capsys, val) -> None:
     it = make_issue(7, body_of("TASK-001"))
     it["pull_request"] = val
-    _, _, p = plan(gh, capsys, fake=FakeGitHub(issues=[it]))
-    assert items(p)["TASK-001"]["action"] != "CREATE"
+    rc, _, p = plan(gh, capsys, fake=FakeGitHub(issues=[it]))
+    assert rc == 0
+    assert items(p)["TASK-001"]["action"] == "SKIP"
 
 
 @pytest.mark.xfail(strict=True, reason="M3a gap (low): label names that are not strings are stringified ('None' -> 'none') and can satisfy a label")

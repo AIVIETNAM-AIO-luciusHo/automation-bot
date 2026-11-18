@@ -131,7 +131,7 @@ def test_cli_plan_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str],
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     (tmp_path / "m.yaml").write_text("members:\n  TV01: {display_name: A, github: dev-a}\n")
     (tmp_path / "t.md").write_text("## TASK-001: a\n- Phụ trách: TV01\n- Labels: backend\n\n## TASK-002: b\n- Phụ trách: TV01\n")
-    prs = {"number": 9, "state": "open", "html_url": "u", "body": marker("t.md", "TASK-002"), "pull_request": {}}
+    prs = {"number": 9, "state": "open", "html_url": "u", "body": marker("t.md", "TASK-002"), "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/9"}}
     args = ["issues", "plan", "--workspace", str(tmp_path), "--input", "t.md", "--members", "m.yaml", "--repo", REPO, "--output-dir", "out"]
     assert main(args, transport=httpx.MockTransport(gh_handler([prs]))) == 0  # PR bị bỏ qua -> TASK-002 vẫn CREATE
     out = capsys.readouterr().out
