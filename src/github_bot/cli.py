@@ -10,6 +10,8 @@ from github_bot.github.validator import validate_against_github
 from github_bot.identities.resolver import MembersError, load_members, resolve_task
 from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
+from github_bot.models import Diagnostic
+from github_bot.planning.planner import PlanError, build_plan, write_preview
 
 # điều khiển C0/C1 + bidi/zero-width (U+200B-200F, 202A-202E, 2066-2069) có thể đánh lừa terminal
 _CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
@@ -70,6 +72,51 @@ def _validate(args: argparse.Namespace, transport: httpx.BaseTransport | None = 
     return 1 if errors or blocks else 0
 
 
+def _plan(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
+    """Lập plan CHỈ ĐỌC (GET): ghi PREVIEW.md/PREVIEW.json/plan.json trong workspace, không ghi GitHub."""
+    try:
+        text, source = load_markdown(args.input, args.workspace)
+        directory = load_members(args.members, args.workspace)
+    except (LoaderError, MembersError) as e:
+        print(_show(f"LỖI: {e}"))
+        return 2
+    result = parse_markdown(text, source)
+    for d in result.diagnostics:
+        print(_show(f"{d.level.upper()} dòng {d.line} [{d.code}] {d.message}"))
+    if result.errors:  # file lỗi: không lập plan (tránh task mất im lặng khỏi plan được duyệt)
+        print("LỖI: file Markdown có lỗi, không lập plan.")
+        return 1
+    resolved = [resolve_task(t, directory) for t in result.tasks]
+    try:
+        client = GitHubClient(transport=transport)
+    except GitHubError as e:
+        print(_show(f"LỖI: {e.message}"))
+        return 2
+    try:
+        gh_diags = validate_against_github(client, args.repo, result.tasks, resolved)
+        issues = None
+        if not any(d.task_id is None for d in gh_diags):
+            owner, _, name = args.repo.partition("/")
+            try:
+                issues = client.list_issues(owner, name)
+            except GitHubError as e:
+                gh_diags.append(Diagnostic(level="error", code=e.code, message=e.message))
+        try:
+            plan = build_plan(args.repo, source, result.tasks, resolved, gh_diags, issues, args.max_tasks)
+            paths = write_preview(plan, args.output_dir, args.workspace)
+        except PlanError as e:
+            print(_show(f"LỖI: {e}"))
+            return 1
+    finally:
+        client.close()
+    blocked = sum(i.action == "BLOCK" for i in plan.items)
+    for p in paths:
+        print(_show(f"Đã ghi {p.relative_to(Path(args.workspace).resolve())}"))
+    print(f"{len(plan.items)} task, {blocked} BLOCK. Plan SHA256: {plan.plan_sha256}")
+    print("Write actions: DISABLED until approval")
+    return 1 if blocked else 0
+
+
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
@@ -87,6 +134,14 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     v.add_argument("--check-github", action="store_true", help="OPT-IN: gọi GitHub (chỉ GET) kiểm tra repo, assignee, label; cần GITHUB_TOKEN")
     v.add_argument("--repo", help="OWNER/REPO cho --check-github (không có mặc định)")
     v.set_defaults(func=lambda a: _validate(a, transport))
+    pl = issues.add_parser("plan", help="Lập plan CHỈ ĐỌC (cần GITHUB_TOKEN); không ghi GitHub")
+    pl.add_argument("--input", required=True, help="File .md nằm trong workspace")
+    pl.add_argument("--members", required=True, help="Danh bạ members.yaml (trong workspace)")
+    pl.add_argument("--repo", required=True, help="OWNER/REPO (không có mặc định)")
+    pl.add_argument("--output-dir", required=True, help="Thư mục trong workspace để ghi PREVIEW.md/PREVIEW.json/plan.json")
+    pl.add_argument("--max-tasks", type=int, default=50, help="max_tasks_per_run (mặc định 50)")
+    pl.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc/ghi")
+    pl.set_defaults(func=lambda a: _plan(a, transport))
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")

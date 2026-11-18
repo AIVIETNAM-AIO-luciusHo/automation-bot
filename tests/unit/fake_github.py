@@ -33,6 +33,7 @@ class FakeGitHub:
         label_body: object | None = None,
         assignee_status: dict[str, int] | None = None,
         permissions: object = DEFAULT_PERMS,
+        issues: Iterable[dict[str, object]] = (),
         override: Callable[[httpx.Request], httpx.Response | None] | None = None,
     ) -> None:
         self.repo = repo
@@ -44,6 +45,7 @@ class FakeGitHub:
         self.label_body = label_body
         self.assignee_status = {k.casefold(): v for k, v in (assignee_status or {}).items()}
         self.permissions = permissions
+        self.issues = list(issues)
         self.override = override
         self.requests: list[httpx.Request] = []
         self.foreign: list[httpx.Request] = []
@@ -64,6 +66,8 @@ class FakeGitHub:
                 return p == f"/repos/{self.repo.lower()}"
             if kind == "labels":
                 return p.endswith("/labels")
+            if kind == "issues":
+                return p.endswith("/issues")
             return "/assignees/" in p
 
         return [r for r in self.requests if match(r.url.path.lower().rstrip("/"))]
@@ -87,6 +91,8 @@ class FakeGitHub:
             return self._json(self.repo_status, self.repo_body, self.repo_json())
         if path.lower() == f"{base}/labels".lower() or path == "/repositories/1/labels":
             return self._labels(request)
+        if path.lower() == f"{base}/issues".lower():
+            return self._issues(request)
         if path.lower().startswith(f"{base}/assignees/".lower()):
             login = path.rsplit("/", 1)[-1].casefold()
             status = self.assignee_status.get(login, 204 if login in self.assignees else 404)
@@ -99,6 +105,21 @@ class FakeGitHub:
         if body is not None or status != 200:
             return httpx.Response(status, json=body if body is not None else {"message": "err"})
         return httpx.Response(status, json=default)
+
+    def _issues(self, request: httpx.Request) -> httpx.Response:
+        """GitHub semantics: default state=open (so a client that forgets state=all misses closed
+        issues); the endpoint returns pull requests too (items with a `pull_request` key)."""
+        q = request.url.params
+        state = q.get("state", "open")
+        rows = [i for i in self.issues if state == "all" or i["state"] == state]
+        per = max(1, min(int(q.get("per_page", "30")), 100))
+        page = max(1, int(q.get("page", "1")))
+        chunk = rows[(page - 1) * per : page * per]
+        headers = {}
+        if page * per < len(rows):
+            nxt = f"https://{HOST}/repositories/1/issues?state={state}&per_page={per}&page={page + 1}"
+            headers["Link"] = f'<{nxt}>; rel="next"'
+        return httpx.Response(200, content=json.dumps(chunk), headers=headers)
 
     def _labels(self, request: httpx.Request) -> httpx.Response:
         if self.label_status != 200 or self.label_body is not None:
@@ -113,6 +134,19 @@ class FakeGitHub:
             nxt = f"https://{HOST}/repositories/1/labels?per_page={per}&page={page + 1}"
             headers["Link"] = f'<{nxt}>; rel="next"'
         return httpx.Response(200, content=json.dumps(items), headers=headers)
+
+
+def make_issue(
+    number: int, body: str = "", *, state: str = "open", pr: bool = False, title: str | None = None
+) -> dict[str, object]:
+    item: dict[str, object] = {
+        "number": number, "state": state, "title": title or f"issue {number}", "body": body,
+        "html_url": f"https://github.com/owner/repo/{'pull' if pr else 'issues'}/{number}",
+        "labels": [], "assignees": [],
+    }  # fmt: skip
+    if pr:
+        item["pull_request"] = {"url": f"https://api.github.com/repos/owner/repo/pulls/{number}"}
+    return item
 
 
 def assert_requests_safe(fake: FakeGitHub, token: str = TOKEN) -> None:
