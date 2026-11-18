@@ -2,6 +2,7 @@
 
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -19,10 +20,12 @@ MAX_RESPONSE_BYTES = 2_000_000  # repo/label thật chỉ vài KB; lớn hơn l�
 class GitHubError(Exception):
     """Lỗi đã phân loại (code ổn định). Thông điệp không bao giờ chứa token hay header."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, status: int | None = None, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status = status  # HTTP status nếu có
+        self.retry_after = retry_after  # giây, nếu GitHub cho biết (Retry-After / x-ratelimit-reset)
 
 
 def _list_of_dicts(r: httpx.Response) -> list[dict[str, Any]]:
@@ -80,8 +83,19 @@ class GitHubClient:
     # -- nội bộ ----------------------------------------------------------------------------
     def _get(self, path: str, params: dict[str, int | str] | None = None) -> httpx.Response:
         """GET; chỉ trả 200/204/404. Mọi trạng thái khác -> GitHubError (fail closed). Không retry."""
+        return self._request("GET", path, params, None, (200, 204, 404))
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, int | str] | None,
+        json_body: dict[str, object] | None,
+        ok: tuple[int, ...],
+    ) -> httpx.Response:
+        """Gửi và phân loại phản hồi. Lớp chỉ-đọc chỉ gọi qua _get; ghi nằm riêng ở execution/."""
         try:
-            with self._http.stream("GET", path, params=params) as resp:
+            with self._http.stream(method, path, params=params, json=json_body) as resp:
                 body = bytearray()
                 for chunk in resp.iter_bytes():  # đọc stream, chặn kể cả khi thiếu Content-Length
                     body += chunk
@@ -91,20 +105,34 @@ class GitHubClient:
         except httpx.HTTPError as e:
             raise GitHubError("NETWORK", f"Lỗi mạng ({type(e).__name__}).") from None
         s = r.status_code
-        if s in (200, 204, 404):
+        if s in ok:
             return r
         if s == 401:
-            raise GitHubError("AUTH_FAILED", "Token bị từ chối (401).")
+            raise GitHubError("AUTH_FAILED", "Token bị từ chối (401).", s)
         if s == 429 or (s == 403 and self._rate_limited(r)):
             reset = r.headers.get("x-ratelimit-reset") or r.headers.get("retry-after") or "?"
-            raise GitHubError("RATE_LIMITED", f"Bị giới hạn tốc độ (reset/retry: {reset[:20]}).")
+            raise GitHubError("RATE_LIMITED", f"Bị giới hạn tốc độ (reset/retry: {reset[:20]}).", s, self._wait_seconds(r))
         if s == 403:
-            raise GitHubError("FORBIDDEN", "Token không đủ quyền (403).")
+            raise GitHubError("FORBIDDEN", "Token không đủ quyền (403).", s)
         if 300 <= s < 400:
-            raise GitHubError("REDIRECT", f"GitHub chuyển hướng ({s}); repo có thể đã đổi tên/chuyển.")
+            raise GitHubError("REDIRECT", f"GitHub chuyển hướng ({s}); repo có thể đã đổi tên/chuyển.", s)
         if s >= 500:
-            raise GitHubError("SERVER_ERROR", f"GitHub lỗi máy chủ ({s}).")
-        raise GitHubError("UNEXPECTED_STATUS", f"Trạng thái không mong đợi ({s}).")
+            raise GitHubError("SERVER_ERROR", f"GitHub lỗi máy chủ ({s}).", s)
+        if s == 404:
+            raise GitHubError("NOT_FOUND", "Không tìm thấy (404).", s)
+        raise GitHubError("UNEXPECTED_STATUS", f"Trạng thái không mong đợi ({s}).", s)
+
+    @staticmethod
+    def _wait_seconds(r: httpx.Response) -> float | None:
+        """Số giây phải chờ theo Retry-After, hoặc x-ratelimit-reset (epoch). None nếu không biết."""
+        try:
+            if "retry-after" in r.headers:
+                return max(0.0, float(r.headers["retry-after"]))
+            if "x-ratelimit-reset" in r.headers:
+                return max(0.0, float(r.headers["x-ratelimit-reset"]) - time.time())
+        except ValueError:
+            pass
+        return None
 
     @staticmethod
     def _rate_limited(r: httpx.Response) -> bool:

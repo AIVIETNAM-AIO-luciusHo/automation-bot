@@ -36,10 +36,16 @@ def test_github_package_exists() -> None:
     assert (SRC / "github").is_dir(), "M2b client package github_bot/github/ not found"
 
 
-def test_no_write_http_methods_anywhere_in_src() -> None:
-    assert not _hits(r"""\.(post|put|patch|delete)\s*\("""), "write-method call"
-    assert not _hits(r"""["'](POST|PUT|PATCH|DELETE)["']""", re.IGNORECASE), "write verb literal"
-    assert not _hits(r"""method\s*=\s*["'](?!GET["'])""", re.IGNORECASE), "non-GET method="
+def test_no_write_http_methods_outside_the_executor_module() -> None:
+    """M3b: exactly one package (src/github_bot/execution/) may issue POST; nobody may PUT/PATCH/DELETE."""
+    def outside_execution(hits: list[str]) -> list[str]:
+        return [h for h in hits if not h.startswith("execution/")]
+
+    assert not outside_execution(_hits(r"""\.(post)\s*\(""")), "POST call outside execution/"
+    assert not outside_execution(_hits(r"""["'](POST)["']""", re.IGNORECASE)), "POST literal outside execution/"
+    assert not _hits(r"""\.(put|patch|delete)\s*\("""), "PUT/PATCH/DELETE call"
+    assert not _hits(r"""["'](PUT|PATCH|DELETE)["']""", re.IGNORECASE), "PUT/PATCH/DELETE literal"
+    assert not _hits(r"""method\s*=\s*["'](?!GET["']|POST["'])""", re.IGNORECASE), "unexpected method="
 
 
 def test_https_only_and_tls_verification_never_disabled() -> None:

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from github_bot.github.client import IssueRef
 from github_bot.identities.resolver import Resolved
@@ -25,6 +25,8 @@ class PlanError(Exception):
 
 
 class PlanItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str
     action: Action
     title: str
@@ -36,6 +38,8 @@ class PlanItem(BaseModel):
 
 
 class Plan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = SCHEMA
     repo: str
     source_file: str

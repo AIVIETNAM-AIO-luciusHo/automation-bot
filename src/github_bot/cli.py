@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 
 from github_bot import __version__
+from github_bot.execution.issue_executor import ApplyRejected, apply_plan
 from github_bot.github.client import GitHubClient, GitHubError
 from github_bot.github.validator import validate_against_github
 from github_bot.identities.resolver import MembersError, load_members, resolve_task
@@ -117,6 +118,19 @@ def _plan(args: argparse.Namespace, transport: httpx.BaseTransport | None = None
     return 1 if blocked else 0
 
 
+def _apply(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
+    """GHI GitHub (tạo issue) từ plan đã duyệt. Mặc định từ chối; cần --write và --approve-hash đúng."""
+    try:
+        code, lines = apply_plan(args.plan, args.approve_hash, args.write, args.repo, args.workspace, transport)
+    except ApplyRejected as e:
+        print(_show(f"TỪ CHỐI: {e}"))
+        return 2
+    for ln in lines:
+        print(_show(ln))
+    print(f"Hoàn tất: exit {code}.")
+    return code
+
+
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
@@ -142,6 +156,13 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     pl.add_argument("--max-tasks", type=int, default=50, help="max_tasks_per_run (mặc định 50)")
     pl.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc/ghi")
     pl.set_defaults(func=lambda a: _plan(a, transport))
+    ap = issues.add_parser("apply", help="GHI: tạo issue từ plan đã duyệt (cần --write và --approve-hash)")
+    ap.add_argument("--plan", required=True, help="plan.json trong workspace")
+    ap.add_argument("--approve-hash", required=True, help="SHA-256 của plan (từ `issues plan`); không có approve-all")
+    ap.add_argument("--write", action="store_true", help="Bật ghi GitHub tường minh (mặc định từ chối)")
+    ap.add_argument("--repo", help="Nếu có, phải khớp repo trong plan")
+    ap.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc/ghi")
+    ap.set_defaults(func=lambda a: _apply(a, transport))
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")
