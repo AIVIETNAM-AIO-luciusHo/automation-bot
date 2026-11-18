@@ -1,5 +1,7 @@
 .venv/
 .env
+.env*
+!.env.example
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -7,3 +9,7 @@ __pycache__/
 dist/
 configs/*.yaml
 !configs/*.example.yaml
+# đầu ra chạy thật: plan/preview/audit và thư mục chạy thử (chứa danh bạ thật)
+/out/
+sandbox/
+audit-*.jsonl
