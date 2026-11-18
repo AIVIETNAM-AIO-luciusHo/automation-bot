@@ -626,3 +626,32 @@ def test_free_text_cannot_ping_people_or_cross_reference_issues(gh, capsys) -> N
     free = body.split("## Phân công")[0] + body.split("## Nguồn công việc")[1]
     assert not re.search(r"(?<![\w`\\])@[A-Za-z0-9]", free + it["title"]), "bare @mention in free text"
     assert not re.search(r"(?<![\w`\\&])#\d+", free + it["title"]), "bare #N reference in free text"
+
+
+@pytest.mark.parametrize("val", [None, False], ids=["null", "false"])
+@pytest.mark.xfail(strict=True, reason="M3a gap (low): `pull_request: null/false` is treated as a PR and dropped, hiding a marker -> possible duplicate")
+def test_non_object_pull_request_key_does_not_hide_an_issue(gh, capsys, val) -> None:
+    it = make_issue(7, body_of("TASK-001"))
+    it["pull_request"] = val
+    _, _, p = plan(gh, capsys, fake=FakeGitHub(issues=[it]))
+    assert items(p)["TASK-001"]["action"] != "CREATE"
+
+
+@pytest.mark.xfail(strict=True, reason="M3a gap (low): label names that are not strings are stringified ('None' -> 'none') and can satisfy a label")
+def test_label_with_non_string_name_blocks(gh, capsys) -> None:
+    def h(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": None}, {"name": 5}])
+        return None
+
+    md = "## TASK-001: Một\n- Phụ trách: TV01\n- Labels: none\n"
+    rc, _, p = plan(gh, capsys, md, fake=FakeGitHub(override=h))
+    assert rc != 0 and items(p)["TASK-001"]["action"] == "BLOCK"
+
+
+@pytest.mark.xfail(strict=True, reason="M3a gap (low): GH-N and bare commit SHAs still auto-link/cross-reference")
+def test_gh_n_and_bare_sha_references_are_neutralized(gh, capsys) -> None:
+    md = "## TASK-001: Một\n- Phụ trách: TV01\n\n### Mô tả\nxem GH-12 và a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 hoặc abcdef1\n"
+    _, _, p = plan(gh, capsys, md)
+    free = items(p)["TASK-001"]["body"].split("## Phân công")[0]
+    assert not re.search(r"(?<![`\w])GH-\d+", free, re.IGNORECASE) and not re.search(r"(?<![`\w])[0-9a-f]{7,40}(?![`\w])", free)
