@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -10,7 +10,7 @@ from github_bot.cli import main
 
 
 class _FullDisk:
-    def __enter__(self) -> "_FullDisk":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *a: object) -> None:
