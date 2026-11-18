@@ -845,3 +845,173 @@ def test_no_test_in_the_suite_can_reach_the_real_github() -> None:
             continue  # this guard names the patterns it forbids
         assert "socket.create_connection" not in text and "urllib.request" not in text, f.name
         assert "httpx.get(" not in text and "httpx.post(" not in text and "requests." not in text, f.name
+
+
+# ---- round 3: interrupt / crash semantics, recovered-issue verification ---------------------------
+
+def _rows(env: Any, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    log = env.ws / "out" / f"audit-{plan['plan_sha256'][:8]}.jsonl"
+    assert log.is_file(), "audit file missing"
+    return [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, RuntimeError, ValueError, OSError], ids=lambda e: e.__name__)
+def test_interrupt_or_crash_on_task_2_logs_task_1_marks_the_rest_not_attempted(env, capsys, exc) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n == 2:
+            raise exc(f"boom {TOKEN} Bearer {TOKEN}")
+        return None
+
+    plan = make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    assert rc != 0 and "Traceback" not in out
+    assert len(env.fake.posts) == 2, "no POST may follow the interrupt/crash"
+    rows = {r["task_id"]: r for r in _rows(env, plan)}
+    assert set(rows) == {f"TASK-{n:03d}" for n in range(1, 6)}, "every task needs an audit line"
+    assert rows["TASK-001"]["action"] == "created" and rows["TASK-001"].get("issue_number")
+    assert rows["TASK-002"].get("error")
+    assert {rows[f"TASK-00{n}"]["action"] for n in (3, 4, 5)} == {"not_attempted"}
+    for t in ("TASK-001", "TASK-002", "TASK-003", "TASK-004", "TASK-005"):
+        assert t in out, f"report is missing {t}"
+    blob = (out + json.dumps(rows)).lower()
+    assert TOKEN.lower() not in blob and "bearer" not in blob and "boom" not in blob
+    assert "documentation_url" not in blob
+
+
+def test_crash_while_reading_before_the_first_post_means_zero_posts_and_clean_exit(env, capsys) -> None:
+    def boom(req: httpx.Request) -> httpx.Response | None:
+        if req.method == "GET" and req.url.path.endswith("/labels"):
+            raise RuntimeError(f"label endpoint exploded {TOKEN}")
+        return None
+
+    make_plan(env, capsys)
+    env.fake.override = boom
+    rc, out = apply(env, capsys)
+    assert rc != 0 and out.strip()
+    assert "Traceback" not in out and TOKEN not in out
+    no_posts(env)
+
+
+def test_crash_in_the_pre_post_reread_is_logged_and_stops_the_run(env, capsys) -> None:
+    state = {"gets": 0}
+
+    def boom(req: httpx.Request) -> httpx.Response | None:
+        if req.method == "GET" and req.url.path.endswith("/issues"):
+            state["gets"] += 1
+            if state["gets"] >= 4:  # revalidation reads happen first; fail on a per-task re-read
+                raise RuntimeError("reread exploded")
+        return None
+
+    plan = make_plan(env, capsys)
+    state["gets"] = 0
+    env.fake.override = boom
+    rc, out = apply(env, capsys)
+    assert rc != 0 and "Traceback" not in out
+    rows = _rows(env, plan)
+    assert len(rows) == 5 and all(r["task_id"] for r in rows)
+    created = {r["task_id"] for r in rows if r["action"].startswith("created")}
+    assert created == set(markers_in_store(env.fake)), "audit and store disagree about what was created"
+
+
+def _recovered(env: Any, capsys: Any, mutate: Any) -> tuple[int, str, dict[str, Any]]:
+    """Server creates the issue, then the response is lost (timeout) -> executor re-reads and recovers."""
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n == 2:
+            item = fake.create(json.loads(req.content))
+            mutate(item)
+            raise httpx.ReadTimeout("response lost")
+        return None
+
+    plan = make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    return rc, out, plan
+
+
+def test_recovered_issue_with_correct_assignees_is_a_success(env, capsys) -> None:
+    rc, out, _ = _recovered(env, capsys, lambda item: None)
+    assert rc == 0, out
+    assert sorted(markers_in_store(env.fake)) == [f"TASK-{n:03d}" for n in range(1, 6)]
+    assert len(env.fake.posts) == 5
+
+
+def test_recovered_issue_with_assignee_case_difference_is_a_success(env, capsys) -> None:
+    rc, out, _ = _recovered(env, capsys, lambda item: item.update(assignees=[{"login": a["login"].upper()} for a in item["assignees"]]))
+    assert rc == 0, out
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("missing", lambda item: item.update(assignees=[])),
+        ("extra", lambda item: item.update(assignees=[*item["assignees"], {"login": "someone-else"}])),
+        ("wrong_person", lambda item: item.update(assignees=[{"login": "example-dev-3"}])),
+        ("null", lambda item: item.update(assignees=None)),
+        ("string", lambda item: item.update(assignees="oops")),
+        ("null_item", lambda item: item.update(assignees=[None])),
+        ("no_login", lambda item: item.update(assignees=[{"nologin": 1}])),
+        ("key_absent", lambda item: item.pop("assignees")),
+    ],
+)
+def test_recovered_issue_with_unverifiable_or_wrong_assignees_is_an_error(env, capsys, name, mutate) -> None:
+    rc, out, plan = _recovered(env, capsys, mutate)
+    assert rc != 0, name
+    assert "TASK-002" in out and "Traceback" not in out
+    row = [r for r in _rows(env, plan) if r["task_id"] == "TASK-002"][-1]
+    assert row.get("error") and ("ASSIGNEE" in row["error"]), row
+    assert len(env.fake.posts) == 5, "recovered issue must never be POSTed again"
+
+
+def test_created_issue_with_extra_assignee_in_the_response_is_a_mismatch(env, capsys) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        item = fake.create(json.loads(req.content))
+        if n == 1:
+            item["assignees"] = [*item["assignees"], {"login": "uninvited"}]
+        return httpx.Response(201, json=item)
+
+    make_plan(env, capsys)
+    env.fake.on_post = hook
+    rc, out = apply(env, capsys)
+    assert rc != 0 and "uninvited" in out
+
+
+def test_every_exit_path_prints_a_report_and_a_nonzero_code_on_any_error(env, capsys) -> None:
+    for status in (422, 500, 403):
+        env.fake = FakeGitHub()
+        env.history.append(env.fake)
+        env.fake.on_post = lambda f, r, n, s=status: httpx.Response(s, json={"message": "no", "documentation_url": "https://x"}) if n == 1 else None
+        make_plan(env, capsys, fake=env.fake)
+        env.fake.on_post = lambda f, r, n, s=status: httpx.Response(s, json={"message": "no", "documentation_url": "https://x"}) if n == 1 else None
+        rc, out = apply(env, capsys)
+        assert rc != 0, status
+        assert all(f"TASK-00{n}" in out for n in range(1, 6)), (status, out)
+        assert "documentation_url" not in out
+
+
+def test_audit_rows_never_carry_bodies_or_raw_server_text_in_any_branch(env, capsys) -> None:
+    def hook(fake: FakeGitHub, req: httpx.Request, n: int) -> httpx.Response | None:
+        if n == 2:
+            return httpx.Response(422, json={"message": "MÔ TẢ SỐ 2 leaked", "documentation_url": "https://docs"})
+        if n == 3:
+            raise RuntimeError("Mô tả số 3 leaked")
+        return None
+
+    plan = make_plan(env, capsys)
+    env.fake.on_post = hook
+    apply(env, capsys)
+    blob = (env.ws / "out" / f"audit-{plan['plan_sha256'][:8]}.jsonl").read_text(encoding="utf-8").lower()
+    for bad in ("leaked", "documentation_url", "mô tả số", "authorization", TOKEN.lower()):
+        assert bad not in blob, bad
+
+
+def test_no_new_write_path_exists_besides_create_issue() -> None:
+    import ast
+
+    tree = ast.parse((SRC / "execution" / "issue_executor.py").read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "_request"]
+    assert len(calls) == 1, "exactly one call to the shared request primitive in the write module"
+    arg = calls[0].args[0]
+    assert isinstance(arg, ast.Constant) and arg.value == "POST"
+    text = "\n".join(p.read_text(encoding="utf-8") for p in sorted(SRC.rglob("*.py")))
+    assert len(re.findall(r"_request\(\s*['\"](?!GET)", text)) == 1

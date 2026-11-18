@@ -133,7 +133,14 @@ def apply_plan(
     lines: list[str] = []
     failed = 0
     try:
-        _revalidate(client, plan)
+        try:
+            _revalidate(client, plan)
+        except ApplyRejected:
+            raise
+        except KeyboardInterrupt:
+            raise ApplyRejected("Bị ngắt (Ctrl-C) khi kiểm tra; chưa tạo issue nào.") from None
+        except Exception as e:  # noqa: BLE001 - không in str(e): có thể chứa bí mật
+            raise ApplyRejected(f"Lỗi bất ngờ khi kiểm tra ({type(e).__name__}); chưa tạo issue nào.") from None
         try:
             log = audit.open("a", encoding="utf-8")
         except OSError:
@@ -154,8 +161,14 @@ def apply_plan(
                     except Exception as e:  # noqa: BLE001 - bug/transport lạ: dừng sạch, vẫn báo và ghi audit những gì đã làm
                         row, stop = {"action": "error", "error": f"UNEXPECTED: {type(e).__name__}; kết quả task này không rõ, chạy lại `issues plan`"}, "dừng sau lỗi bất ngờ"
                 row = {**base, **row}
-                log.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-                log.flush()  # mỗi task một dòng, ngay lập tức
+                try:
+                    log.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                    log.flush()  # mỗi task một dòng, ngay lập tức
+                except OSError:  # đĩa đầy...: issue có thể đã tạo mà không có audit -> dừng, báo rõ
+                    lines.append(_line(row))
+                    lines.append("LỖI: không ghi được audit sau khi đã tạo issue, kết quả có thể không đầy đủ; chạy lại `issues plan` trước khi làm gì tiếp. Các task còn lại chưa được xử lý.")
+                    failed += 1
+                    break
                 ok = row["action"] in ("created", "created_recovered", "skip_existing") and "error" not in row
                 failed += not ok
                 lines.append(_line(row))
