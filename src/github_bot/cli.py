@@ -11,12 +11,13 @@ from github_bot.identities.resolver import MembersError, load_members, resolve_t
 from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
 
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# điều khiển C0/C1 + bidi/zero-width (U+200B-200F, 202A-202E, 2066-2069) có thể đánh lừa terminal
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 def _show(msg: str) -> str:
     """In thông báo an toàn: ký tự điều khiển (ESC, CR...) từ dữ liệu người dùng bị thoát, không tới terminal."""
-    return _CTRL.sub(lambda m: f"\\x{ord(m.group()):02x}", msg)
+    return _CTRL.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 256 else f"\\u{ord(m.group()):04x}", msg)
 
 
 def _validate(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:

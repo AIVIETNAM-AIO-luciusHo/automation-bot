@@ -11,6 +11,7 @@ from github_bot.identities.resolver import GITHUB_LOGIN
 DEFAULT_BASE_URL = "https://api.github.com"
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}\Z")
 PER_PAGE = 100  # tối đa của GitHub cho endpoint danh sách
+MAX_RESPONSE_BYTES = 2_000_000  # repo/label thật chỉ vài KB; lớn hơn là bất thường -> từ chối
 
 
 class GitHubError(Exception):
@@ -47,6 +48,7 @@ class GitHubClient:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
+                "Accept-Encoding": "identity",  # JSON nhỏ; tránh gzip bomb giải nén cả chunk trước khi kiểm ngưỡng
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "github-automation-bot",
             },
@@ -62,7 +64,13 @@ class GitHubClient:
     def _get(self, path: str, params: dict[str, int] | None = None) -> httpx.Response:
         """GET; chỉ trả 200/204/404. Mọi trạng thái khác -> GitHubError (fail closed). Không retry."""
         try:
-            r = self._http.get(path, params=params)
+            with self._http.stream("GET", path, params=params) as resp:
+                body = bytearray()
+                for chunk in resp.iter_bytes():  # đọc stream, chặn kể cả khi thiếu Content-Length
+                    body += chunk
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise GitHubError("BAD_RESPONSE", f"Phản hồi lớn hơn {MAX_RESPONSE_BYTES} byte.")
+                r = httpx.Response(resp.status_code, headers=resp.headers, content=bytes(body))
         except httpx.HTTPError as e:
             raise GitHubError("NETWORK", f"Lỗi mạng ({type(e).__name__}).") from None
         s = r.status_code

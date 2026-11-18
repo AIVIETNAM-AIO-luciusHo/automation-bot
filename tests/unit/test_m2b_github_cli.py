@@ -537,7 +537,6 @@ def test_plain_403_without_rate_limit_headers_is_a_permission_block(gh, capsys) 
 
 # ---- hardening round: oversized bodies, label list too long, control chars in --repo ---------
 
-@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
 def test_oversized_response_body_is_not_accepted(gh, capsys) -> None:
     pad = b"x" * 20_000_000  # a real repo JSON is ~5 KB; anything this big must be refused
 
@@ -552,7 +551,6 @@ def test_oversized_response_body_is_not_accepted(gh, capsys) -> None:
     assert rc != 0 and out.strip(), "20 MB repo response must be BLOCKed (response size cap)"
 
 
-@pytest.mark.xfail(strict=True, reason="known gap M2b: no response size cap (low); remove mark when fixed")
 def test_oversized_label_page_is_not_accepted(gh, capsys) -> None:
     def big(req: httpx.Request) -> httpx.Response | None:
         if req.url.path.endswith("/labels"):
@@ -577,3 +575,115 @@ def test_control_characters_in_repo_arg_are_not_echoed_raw(gh, capsys) -> None:
     assert rc != 0
     assert "\x1b" not in out and "\r" not in out, repr(out)
     assert gh.fake.requests == []
+
+
+# ---- M3.0: response size cap (~2MB), also without Content-Length; bidi escaping --------------
+
+def _stream(total: int, chunk: int = 65536):  # type: ignore[no-untyped-def]
+    """Body with NO Content-Length (chunked); a client that reads it all consumes `total` bytes."""
+    sent = {"n": 0}
+
+    def gen():  # type: ignore[no-untyped-def]
+        while sent["n"] < total:
+            sent["n"] += chunk
+            yield b" " * chunk
+
+    return gen(), sent
+
+
+def test_chunked_repo_response_without_content_length_is_capped(gh, capsys) -> None:
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.rstrip("/") == "/repos/owner/repo":
+            body, _ = _stream(50_000_000)
+            return httpx.Response(200, content=body)
+        return None
+
+    rc, out = run(gh, capsys, FakeGitHub(override=big))
+    assert rc != 0 and out.strip()
+
+
+def test_oversized_assignee_response_is_blocked(gh, capsys) -> None:
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if "/assignees/" in req.url.path:
+            return httpx.Response(204, content=b"x" * 20_000_000)
+        return None
+
+    rc, out = run(gh, capsys, FakeGitHub(override=big))
+    assert rc != 0 and out.strip()
+
+
+def test_oversized_label_page_without_content_length_is_capped(gh, capsys) -> None:
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.endswith("/labels"):
+            body, _ = _stream(50_000_000)
+            return httpx.Response(200, content=body)
+        return None
+
+    md = "## TASK-001: Một\n- Phụ trách: TV01\n- Labels: backend\n"
+    rc, _ = run(gh, capsys, FakeGitHub(override=big), md=md)
+    assert rc != 0
+
+
+def test_size_cap_stops_reading_early_not_after_the_whole_body(gh, capsys) -> None:
+    seen = {}
+
+    def big(req: httpx.Request) -> httpx.Response | None:
+        if req.url.path.rstrip("/") == "/repos/owner/repo":
+            body, sent = _stream(200_000_000)
+            seen["sent"] = sent
+            return httpx.Response(200, content=body)
+        return None
+
+    rc, _ = run(gh, capsys, FakeGitHub(override=big))
+    assert rc != 0
+    assert seen["sent"]["n"] < 20_000_000, "client kept reading far past the cap"
+
+
+def test_normal_sized_responses_still_pass_after_the_cap(gh, capsys) -> None:
+    rc, out = run(gh, capsys, FakeGitHub(labels=[*(f"l{i}" for i in range(250)), "backend", "auth", "database"]))
+    assert rc == 0, out
+
+
+BIDI = [chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A), *range(0x200B, 0x2010))]
+
+
+@pytest.mark.parametrize("ch", BIDI, ids=[f"U+{ord(c):04X}" for c in BIDI])
+def test_bidi_and_zero_width_chars_are_escaped_in_output(gh, capsys, ch) -> None:
+    md = f"| Mã | Công việc |\n|---|---|\n| T{ch}1 | a{ch} |\n## TASK-009: x{ch}\n"
+    rc, out = run(gh, capsys, md=md, args=[])
+    assert rc != 0
+    assert ch not in out, f"U+{ord(ch):04X} reached the terminal unescaped"
+
+
+def test_bidi_in_repo_arg_and_members_error_is_escaped(gh, capsys) -> None:
+    rc, out = run(gh, capsys, args=["--check-github", "--repo", "owner/re\u202epo"])
+    assert rc != 0 and "\u202e" not in out
+    rc, out = run(gh, capsys, members="members:\n  TV01: {display_name: \"A\u202e\", github: bad login}\n", args=[])
+    assert rc != 0 and "\u202e" not in out
+
+
+def test_exact_cap_passes_and_cap_plus_one_blocks_on_client() -> None:
+    import json as _json
+
+    from github_bot.github.client import MAX_RESPONSE_BYTES, GitHubClient, GitHubError
+
+    def body(total: int) -> bytes:
+        d = {"full_name": "owner/repo", "has_issues": True, "archived": False, "pad": ""}
+        d["pad"] = "x" * (total - len(_json.dumps(d, separators=(",", ":"))))
+        return _json.dumps(d, separators=(",", ":")).encode()
+
+    def client(n: int) -> GitHubClient:
+        return GitHubClient(
+            token=TOKEN, transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body(n)))
+        )
+
+    assert client(MAX_RESPONSE_BYTES).get_repo("owner", "repo")
+    with pytest.raises(GitHubError):
+        client(MAX_RESPONSE_BYTES + 1).get_repo("owner", "repo")
+
+
+def test_client_asks_for_identity_encoding_to_avoid_decompression_bombs(gh, capsys) -> None:
+    rc, _ = run(gh, capsys)
+    assert rc == 0
+    assert gh.fake.requests
+    assert all(r.headers.get("accept-encoding", "").strip().lower() == "identity" for r in gh.fake.requests)
