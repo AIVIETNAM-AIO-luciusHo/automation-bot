@@ -192,9 +192,11 @@ class GitHubClient:
                 raise GitHubError("NOT_FOUND", "Không đọc được danh sách label.")
             try:
                 items = _list_of_dicts(r)
-                batch = [str(i["name"]) for i in items]
+                batch = [i["name"] for i in items]
             except (ValueError, TypeError, KeyError):
                 raise GitHubError("BAD_RESPONSE", "Phản hồi label không hợp lệ.") from None
+            if any(not isinstance(name, str) for name in batch):
+                raise GitHubError("BAD_RESPONSE", "Phản hồi label có tên không phải chuỗi.")
             names.update(n.casefold() for n in batch)
             if len(items) < PER_PAGE:
                 return names
