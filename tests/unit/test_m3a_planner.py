@@ -639,7 +639,6 @@ def test_pull_request_without_nonempty_object_keeps_issue_marker(gh, capsys, val
     assert items(p)["TASK-001"]["action"] == "SKIP"
 
 
-@pytest.mark.xfail(strict=True, reason="M3a gap (low): label names that are not strings are stringified ('None' -> 'none') and can satisfy a label")
 def test_label_with_non_string_name_blocks(gh, capsys) -> None:
     def h(req: httpx.Request) -> httpx.Response | None:
         if req.url.path.endswith("/labels"):
