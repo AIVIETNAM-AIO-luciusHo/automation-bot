@@ -121,3 +121,21 @@ def test_html_comment_heading_is_not_a_task_and_warns() -> None:
     # one-line comment form too
     r = parse_markdown(_GOOD + "<!-- ## TASK-003: hidden -->\n", "x.md")
     assert [t.id for t in r.tasks] == ["TASK-001"]
+
+
+def test_misspelled_task_prefix_warns_on_heading_line() -> None:
+    md = _GOOD + (
+        "## Ghi chú\n"
+        "```md\n"
+        "## TASKS-003\n"
+        "```\n"
+        "`## TASKS-004`\n"
+        "## `TASKS-005`\n"
+        "## TASKS-002\n"
+    )
+    result = parse_markdown(md, "x.md")
+    assert [task.id for task in result.tasks] == ["TASK-001"]
+    assert [(d.level, d.code, d.line) for d in result.diagnostics] == [
+        ("warning", "TASK_HEADING_MISMATCH", 10),
+    ]
+    assert "trông giống task nhưng không khớp mẫu" in result.diagnostics[0].message
