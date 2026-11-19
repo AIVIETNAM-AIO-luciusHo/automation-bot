@@ -12,6 +12,7 @@ from github_bot.markdown.normalizer import (
 from github_bot.models import Diagnostic, ParseResult, Task
 
 _TASK_HEADING = re.compile(r"^(TASK-\d+)\s*:\s*(\S.*)$")
+_MISSPELLED_TASK_HEADING = re.compile(r"^TASKS-\d+\b", re.IGNORECASE)
 _ID = re.compile(r"^[A-Za-z]+-?\d+$")
 _SEP_CELL = re.compile(r"^:?-+:?$")
 _BULLET_KV = re.compile(r"^[-*]\s+([^:]+?)\s*:\s*(.*)$")
@@ -129,6 +130,9 @@ def parse_headings(text: str, source_file: str) -> tuple[Found, list[Diagnostic]
                 else:
                     diags.append(Diagnostic(level="error", code="MALFORMED_ID", line=n,
                                             message="Heading task phải có dạng '## TASK-<số>: <tên>'."))  # fmt: skip
+            elif line[2:3].isspace() and _MISSPELLED_TASK_HEADING.match(head):
+                diags.append(Diagnostic(level="warning", code="TASK_HEADING_MISMATCH", line=n,
+                                        message="Heading trông giống task nhưng không khớp mẫu '## TASK-<số>: <tên>'."))  # fmt: skip
             continue
         if cur is None:
             continue
