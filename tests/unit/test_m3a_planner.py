@@ -656,3 +656,27 @@ def test_gh_n_and_bare_sha_references_are_neutralized(gh, capsys) -> None:
     _, _, p = plan(gh, capsys, md)
     free = items(p)["TASK-001"]["body"].split("## Phân công")[0]
     assert not re.search(r"(?<![`\w])GH-\d+", free, re.IGNORECASE) and not re.search(r"(?<![`\w])[0-9a-f]{7,40}(?![`\w])", free)
+
+
+@pytest.mark.parametrize("count", [10, 11])
+def test_plan_enforces_assignee_limit(gh, capsys, count) -> None:
+    member_ids = [f"TV{n:02d}" for n in range(1, count + 1)]
+    logins = [f"limit-dev-{n:02d}" for n in range(1, count + 1)]
+    members = "members:\n" + "".join(
+        f"  {member}: {{display_name: 'Thành viên {member}', github: '{login}'}}\n"
+        for member, login in zip(member_ids, logins, strict=True)
+    )
+    md = f"## TASK-001: Kiểm tra phân công\n- Phụ trách: {', '.join(member_ids)}\n"
+    fake = FakeGitHub(assignees=logins)
+    rc, out, result = plan(gh, capsys, md, fake, members=members)
+    item = items(result)["TASK-001"]
+
+    assert fake.posts == []
+    if count == 10:
+        assert rc == 0, out
+        assert item["action"] == "CREATE"
+        assert sorted(item["assignees"]) == logins
+    else:
+        assert rc != 0, out
+        assert item["action"] == "BLOCK"
+        assert "10" in json.dumps(item["reasons"], ensure_ascii=False)

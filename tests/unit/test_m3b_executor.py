@@ -1028,3 +1028,16 @@ def test_ctrl_c_during_the_pre_post_checks_means_zero_posts_and_a_clean_message(
     rc, out = apply(env, capsys)
     assert rc != 0 and out.strip() and "Traceback" not in out
     no_posts(env)
+
+
+def test_apply_refuses_valid_hash_with_eleven_assignees(env, capsys) -> None:
+    logins = [f"limit-dev-{n:02d}" for n in range(1, 12)]
+    fake = FakeGitHub(assignees=["example-dev-1", *logins])
+    plan = make_plan(env, capsys, md=TASKS5.split("## TASK-002:", 1)[0], fake=fake)
+    plan["items"][0]["assignees"] = logins
+    write_plan(env, plan, rehash=True)
+
+    rc, out = apply(env, capsys, plan)
+    no_posts(env)
+    assert rc != 0, out
+    assert "10" in out, out
