@@ -1,4 +1,5 @@
 import argparse
+import json
 import re
 from pathlib import Path
 from string import punctuation
@@ -13,6 +14,7 @@ from github_bot.identities.resolver import MembersError, load_members, resolve_t
 from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
 from github_bot.models import Diagnostic
+from github_bot.planning.dependency_pr import dependency_pr_plan
 from github_bot.planning.planner import PlanError, build_plan, write_preview
 
 # điều khiển C0/C1 + bidi/zero-width (U+200B-200F, 202A-202E, 2066-2069) có thể đánh lừa terminal
@@ -179,6 +181,16 @@ def _dependabot_report(args: argparse.Namespace, transport: httpx.BaseTransport 
     return 0
 
 
+def _dependency_pr_plan(args: argparse.Namespace) -> int:
+    try:
+        plan = dependency_pr_plan(args.workspace, args.repo, args.branch, args.title, args.file)
+    except (GitHubError, PlanError) as error:
+        print(_show(f"LỖI: {error}"))
+        return 2
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
@@ -221,6 +233,18 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
         help="Gán ecosystem vào nhóm, có thể dùng nhiều lần",
     )
     report.set_defaults(func=lambda a: _dependabot_report(a, transport))
+    dependencies = sub.add_parser("dependencies", help="Preview cập nhật phụ thuộc")
+    pr_plan = dependencies.add_subparsers(dest="cmd", required=True).add_parser(
+        "pr-plan", help="In kế hoạch PR từ Git index cục bộ",
+    )
+    pr_plan.add_argument("--workspace", type=Path, default=Path.cwd(), help="Gốc Git worktree")
+    pr_plan.add_argument("--repo", required=True, help="Repo đích OWNER/REPO")
+    pr_plan.add_argument("--branch", required=True, help="Tên nhánh dự kiến")
+    pr_plan.add_argument("--title", required=True, help="Tiêu đề PR dự kiến")
+    pr_plan.add_argument(
+        "--file", action="append", required=True, help="Tệp staged pyproject.toml hoặc uv.lock",
+    )
+    pr_plan.set_defaults(func=_dependency_pr_plan)
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")
