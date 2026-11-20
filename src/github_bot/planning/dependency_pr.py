@@ -16,7 +16,10 @@ _OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
 
 
-def _git(root: Path, *args: str) -> bytes:
+def _git_result(
+    root: Path, *args: str, data: bytes | None = None,
+    index: Path | None = None, allowed: tuple[int, ...] = (0,),
+) -> subprocess.CompletedProcess[bytes]:
     env = {key: os.environ[key] for key in ("PATH", "SystemRoot") if key in os.environ}
     env.update(
         GIT_CONFIG_GLOBAL=os.devnull,
@@ -30,15 +33,32 @@ def _git(root: Path, *args: str) -> bytes:
     )
     command = [
         "git", "--no-optional-locks", "-c", "core.fsmonitor=false",
-        "-c", f"core.hooksPath={os.devnull}", *args,
+        "-c", f"core.hooksPath={os.devnull}",
     ]
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
+        command.extend(["-c", "core.splitIndex=false", "-c", "core.sparseCheckout=false"])
     try:
-        return subprocess.run(
-            command, cwd=root, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=20,
-        ).stdout
+        result = subprocess.run(
+            [*command, *args], cwd=root, env=env, input=data if data is not None else b"",
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
+        )
     except (OSError, subprocess.SubprocessError):
-        raise PlanError("Không kiểm tra được Git cục bộ hoặc tên nhánh không hợp lệ.") from None
+        raise PlanError("Không thể thực hiện thao tác Git cục bộ.") from None
+    if result.returncode not in allowed:
+        raise PlanError(f"Git cục bộ từ chối thao tác (mã {result.returncode}).")
+    return result
+
+
+def _git(
+    root: Path, *args: str, data: bytes | None = None, index: Path | None = None,
+) -> bytes:
+    return _git_result(root, *args, data=data, index=index).stdout
+
+
+def dependency_plan_hash(plan: dict[str, object]) -> str:
+    canonical = json.dumps(plan, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _worktree_matches(path: Path, mode: str, oid: str) -> bool:
@@ -119,6 +139,5 @@ def dependency_pr_plan(
     plan: dict[str, object] = {
         "repo": repo, "base_sha": base, "branch": branch, "title": title, "files": entries,
     }
-    canonical = json.dumps(plan, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    plan["plan_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    plan["plan_sha256"] = dependency_plan_hash(plan)
     return plan
