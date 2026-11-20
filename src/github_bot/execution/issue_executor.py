@@ -18,7 +18,7 @@ from github_bot.github.validator import validate_against_github
 from github_bot.identities.resolver import GITHUB_LOGIN, Resolved
 from github_bot.markdown.loader import LoaderError, read_workspace_file
 from github_bot.models import Task
-from github_bot.planning.planner import Plan, marker, plan_hash
+from github_bot.planning.planner import MAX_ASSIGNEES, Plan, marker, plan_hash
 
 MAX_ITEMS = 50
 MAX_ATTEMPTS = 3  # số lần thử POST mỗi task khi bị rate-limit
@@ -75,6 +75,8 @@ def load_plan(path: str, workspace: str | Path, approve_hash: str) -> Plan:
             raise ApplyRejected(f"Plan có task BLOCK ({i.task_id}); all-or-nothing, hãy sửa rồi lập plan lại.")
         if i.action != "CREATE":
             continue
+        if len({login.casefold() for login in i.assignees}) > MAX_ASSIGNEES:
+            raise ApplyRejected(f"Item {i.task_id} vượt giới hạn {MAX_ASSIGNEES} người phụ trách.")
         last = i.body.rstrip().splitlines()[-1].strip() if i.body.strip() else ""
         if (
             not i.title.strip() or len(i.title) > 256 or _CTRL.search(i.title)

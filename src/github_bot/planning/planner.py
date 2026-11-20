@@ -15,6 +15,7 @@ from github_bot.models import Diagnostic, Task
 
 Action = Literal["CREATE", "SKIP", "BLOCK"]  # UPDATE thuộc M4
 SCHEMA = "plan-v1"
+MAX_ASSIGNEES = 10
 _MARKER = re.compile(r"<!-- github-automation-bot: source=([^;<>\s]*); task_id=([A-Za-z0-9-]+); schema=v1 -->")
 _CTRL = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069]")
 PREVIEW_FILES = ("PREVIEW.md", "PREVIEW.json", "plan.json")
@@ -142,6 +143,8 @@ def build_plan(
     for t in tasks:
         r = res[t.id]
         reasons = [f"{d.code}: {d.message}" for d in r.diagnostics if d.level == "error"]
+        if len({login.casefold() for login in r.assignees}) > MAX_ASSIGNEES:
+            reasons.append(f"TOO_MANY_ASSIGNEES: Mỗi issue có tối đa {MAX_ASSIGNEES} người phụ trách.")
         reasons += [f"{d.code}: {d.message}" for d in per_task.get(t.id, [])]
         reasons += [d.code for d in glob]  # chỉ mã: thông điệp mạng có thể đổi theo lần chạy
         if issues is None and not glob:
