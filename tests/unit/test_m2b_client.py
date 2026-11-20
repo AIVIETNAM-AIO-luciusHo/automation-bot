@@ -9,11 +9,14 @@ Behaviour is covered end-to-end in test_m2b_github_cli.py; here only static/stru
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import pytest
 from fake_github import TOKEN, FakeGitHub
+
+from github_bot.github.client import GitHubClient, GitHubError
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "github_bot"
 
@@ -75,8 +78,6 @@ def test_no_fstring_or_format_of_response_headers_into_messages() -> None:
 
 @pytest.fixture
 def client_cls(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
-    from github_bot.github.client import GitHubClient
-
     fake = FakeGitHub()
     orig = httpx.Client.__init__
 
@@ -112,3 +113,40 @@ def test_client_exposes_no_mutating_operations(client_cls) -> None:
     rx = re.compile(r"(post|put|patch|delete|create|add|update|remove|set_|assign|merge|reopen)")
     bad = [n for n in names if rx.match(n.lower())]
     assert not bad, bad
+
+
+@pytest.mark.parametrize("over_limit", [False, True], ids=["exact-limit", "one-byte-over"])
+def test_get_limits_stream_without_content_length(over_limit: bool) -> None:
+    class RepoStream(httpx.SyncByteStream):
+        closed = False
+
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"{}"
+            yield b" " * 999_998
+            yield b" " * 1_000_000
+            if over_limit:
+                yield b" "
+                pytest.fail("GET đọc tiếp sau khi đã vượt giới hạn")
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = RepoStream()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        response = httpx.Response(200, stream=stream)
+        assert "Content-Length" not in response.headers
+        return response
+
+    client = GitHubClient(token=TOKEN, transport=httpx.MockTransport(respond))
+    try:
+        if over_limit:
+            with pytest.raises(GitHubError) as exc:
+                client.get_repo("owner", "repo")
+            assert exc.value.code == "BAD_RESPONSE"
+        else:
+            assert client.get_repo("owner", "repo") == {}
+        assert stream.closed
+    finally:
+        client.close()
