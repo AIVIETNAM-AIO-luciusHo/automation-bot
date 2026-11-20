@@ -16,6 +16,7 @@ _MISSPELLED_TASK_HEADING = re.compile(r"^TASKS-\d+\b", re.IGNORECASE)
 _ID = re.compile(r"^[A-Za-z]+-?\d+$")
 _SEP_CELL = re.compile(r"^:?-+:?$")
 _BULLET_KV = re.compile(r"^[-*]\s+([^:]+?)\s*:\s*(.*)$")
+_COMMENT_KV = re.compile(r"^(?:[-*]\s+)?([^:]+?)\s*:")
 _BULLET = re.compile(r"^[-*]\s+(?:\[[ xX]\]\s*)?(\S.*)$")
 _DESC = {"mo ta", "description"}
 _AC = {"tieu chi nghiem thu", "acceptance criteria"}
@@ -35,6 +36,18 @@ def _taskish(head: str) -> bool:
     return bool(re.match(r"^TASK(?:[-–—_.#:\s]*\d|\s*[-–—:_#])", h, re.IGNORECASE))
 
 
+def _comment_heading(line: str) -> bool:
+    heading = re.match(r"^\s*#{1,6}\s*(.+)$", line)
+    return bool(heading and _taskish(heading.group(1)))
+
+
+def _comment_task_data(line: str) -> bool:
+    if "|" in line and {"id", "title"} <= {canon_field(cell) for cell in split_row(line)}:
+        return True
+    field = _COMMENT_KV.match(line.strip())
+    return bool(field and canon_field(field.group(1)))
+
+
 def _scan(text: str) -> tuple[list[tuple[int, str]], list[Diagnostic]]:
     """([(số dòng từ 1, nội dung)], diagnostics của lớp quét). Bỏ code fence và comment HTML
     (dữ liệu không đáng tin). Fence đóng bằng cùng ký tự, độ dài >= fence mở, không có info string."""
@@ -43,13 +56,18 @@ def _scan(text: str) -> tuple[list[tuple[int, str]], list[Diagnostic]]:
     fence = ""
     opened = 0
     in_comment = 0  # dòng mở comment chưa đóng
+    comment_lines: list[str] = []
 
-    def note_comment(inner: str, n: int) -> None:
-        for ln in inner.splitlines() or [inner]:
-            m = re.match(r"^\s*#{1,6}\s*(.+)$", ln)
-            if m and _taskish(m.group(1)):
-                diags.append(Diagnostic(level="warning", code="COMMENTED_TASK", line=n,
-                                        message="Heading task nằm trong comment HTML, không tạo task."))  # fmt: skip
+    def warn_heading(n: int) -> None:
+        diags.append(Diagnostic(level="warning", code="COMMENTED_TASK", line=n,
+                                message="Heading task nằm trong comment HTML, không tạo task."))  # fmt: skip
+
+    def note_comment(lines: list[str], n: int) -> None:
+        if any(map(_comment_heading, lines)):
+            warn_heading(n)
+        elif any(map(_comment_task_data, lines)):
+            diags.append(Diagnostic(level="warning", code="COMMENTED_TASK", line=n,
+                                    message="Bảng hoặc trường task nằm trong comment HTML, nội dung bị bỏ qua."))  # fmt: skip
 
     for n, line in enumerate(text.splitlines(), 1):
         f = _FENCE.match(line.lstrip())
@@ -59,21 +77,23 @@ def _scan(text: str) -> tuple[list[tuple[int, str]], list[Diagnostic]]:
             continue
         if in_comment:
             end = line.find("-->")
-            note_comment(line if end < 0 else line[:end], n)
+            comment_lines.append(line if end < 0 else line[:end])
             if end < 0:
                 continue
+            note_comment(comment_lines, in_comment)
+            comment_lines.clear()
             in_comment, line = 0, line[end + 3 :]
             f = _FENCE.match(line.lstrip())
         if f:
             fence, opened = f.group(1), n
             continue
         for m in _COMMENT.finditer(line):
-            note_comment(m.group(1), n)
+            note_comment([m.group(1)], n)
         line = _COMMENT.sub("", line)
         start = line.find("<!--")
         if start >= 0:
             in_comment = n
-            note_comment(line[start + 4 :], n)
+            comment_lines.append(line[start + 4 :])
             line = line[:start]
         if line.strip() or not in_comment:
             out.append((n, line))
@@ -81,6 +101,9 @@ def _scan(text: str) -> tuple[list[tuple[int, str]], list[Diagnostic]]:
         diags.append(Diagnostic(level="error", code="UNCLOSED_FENCE", line=opened,
                                 message="Code fence không đóng; phần sau bị bỏ qua."))  # fmt: skip
     if in_comment:
+        for n, line in enumerate(comment_lines, in_comment):
+            if _comment_heading(line):
+                warn_heading(n)
         diags.append(Diagnostic(level="error", code="UNCLOSED_COMMENT", line=in_comment,
                                 message="Comment HTML không đóng; phần sau bị bỏ qua."))  # fmt: skip
     return out, diags

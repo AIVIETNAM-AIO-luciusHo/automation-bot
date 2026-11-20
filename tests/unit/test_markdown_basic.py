@@ -104,3 +104,41 @@ def test_unclosed_comment_and_commented_task_warning():
     assert "UNCLOSED_COMMENT" in codes("## TASK-001: a\n<!--\n## TASK-002: b\n")
     r = parse_markdown("## TASK-001: a\n<!-- ## TASK-002: b -->\n", "x.md")
     assert [t.id for t in r.tasks] == ["TASK-001"] and [d.code for d in r.diagnostics] == ["COMMENTED_TASK"]
+
+
+@pytest.mark.parametrize(
+    ("hidden", "expected"),
+    [
+        pytest.param(
+            "| Mã | Công việc |\n|---|---|\n| T02 | Ẩn |",
+            [("warning", "COMMENTED_TASK", 2)],
+            id="task-table",
+        ),
+        pytest.param(
+            "- Phụ trách: TV99",
+            [("warning", "COMMENTED_TASK", 2)],
+            id="task-field",
+        ),
+        pytest.param(
+            "- Labels:",
+            [("warning", "COMMENTED_TASK", 2)],
+            id="empty-task-field",
+        ),
+        pytest.param(
+            "## TASK-002: Ẩn\n## TASK-003: Cũng ẩn\n- Labels:",
+            [("warning", "COMMENTED_TASK", 2)],
+            id="one-warning-at-opening-line",
+        ),
+        pytest.param("| Mã | Trạng thái |\n|---|---|\n| T02 | Xong |", [], id="table-without-title"),
+    ],
+)
+def test_closed_comment_warns_without_changing_visible_task(hidden, expected) -> None:
+    before = "## TASK-001: Công việc\n"
+    after = "- Phụ trách: TV01\n- Labels: backend\n\n### Mô tả\nMô tả bên ngoài.\n"
+    visible = parse_markdown(before + after, "x.md")
+    result = parse_markdown(f"{before}<!--\n{hidden}\n-->\n{after}", "x.md")
+
+    assert [task.model_dump(exclude={"source_reference"}) for task in result.tasks] == [
+        task.model_dump(exclude={"source_reference"}) for task in visible.tasks
+    ]
+    assert [(d.level, d.code, d.line) for d in result.diagnostics] == expected
