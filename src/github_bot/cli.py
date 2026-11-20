@@ -7,6 +7,7 @@ from string import punctuation
 import httpx
 
 from github_bot import __version__
+from github_bot.execution.dependency_pr import dependency_pr_apply
 from github_bot.execution.issue_executor import ApplyRejected, apply_plan
 from github_bot.github.client import GitHubClient, GitHubError
 from github_bot.github.validator import validate_against_github
@@ -191,6 +192,16 @@ def _dependency_pr_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dependency_pr_apply(args: argparse.Namespace) -> int:
+    try:
+        result = dependency_pr_apply(args.workspace, args.plan, args.approve_hash, args.write)
+    except (GitHubError, PlanError) as error:
+        print(_show(f"LỖI: {error}"))
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
@@ -234,7 +245,8 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     )
     report.set_defaults(func=lambda a: _dependabot_report(a, transport))
     dependencies = sub.add_parser("dependencies", help="Preview cập nhật phụ thuộc")
-    pr_plan = dependencies.add_subparsers(dest="cmd", required=True).add_parser(
+    dependency_commands = dependencies.add_subparsers(dest="cmd", required=True)
+    pr_plan = dependency_commands.add_parser(
         "pr-plan", help="In kế hoạch PR từ Git index cục bộ",
     )
     pr_plan.add_argument("--workspace", type=Path, default=Path.cwd(), help="Gốc Git worktree")
@@ -245,6 +257,12 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
         "--file", action="append", required=True, help="Tệp staged pyproject.toml hoặc uv.lock",
     )
     pr_plan.set_defaults(func=_dependency_pr_plan)
+    pr_apply = dependency_commands.add_parser("pr-apply", help="Tạo nhánh và commit Git cục bộ")
+    pr_apply.add_argument("--workspace", type=Path, required=True, help="Gốc Git worktree")
+    pr_apply.add_argument("--plan", required=True, help="Tệp plan JSON trong workspace")
+    pr_apply.add_argument("--approve-hash", required=True, help="SHA-256 của plan đã duyệt")
+    pr_apply.add_argument("--write", action="store_true", help="Cho phép ghi nhánh Git cục bộ")
+    pr_apply.set_defaults(func=_dependency_pr_apply)
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")
