@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from github_bot.identities.resolver import GITHUB_LOGIN
 
@@ -42,6 +42,12 @@ class IssueRef(BaseModel):
     url: str
     body: str
     assignees: list[str] | None = None  # None = thiếu/không đọc được -> không xác minh được
+
+
+class DependabotPull(BaseModel):
+    number: int = Field(strict=True, gt=0)
+    title: str
+    ref: str
 
 
 def _logins(raw: object) -> list[str] | None:
@@ -223,3 +229,30 @@ class GitHubClient:
             if len(items) < PER_PAGE:
                 return out
         raise GitHubError("TOO_MANY_PAGES", f"Hơn {self._max_pages} trang issue; danh sách chưa đầy đủ.")
+
+    def list_dependabot_pulls(self, owner: str, repo: str) -> list[DependabotPull]:
+        path = f"{self._repo_path(owner, repo)}/pulls"
+        pulls: list[DependabotPull] = []
+        for page in range(1, self._max_pages + 1):
+            response = self._get(path, {"state": "open", "per_page": PER_PAGE, "page": page})
+            if response.status_code != 200:
+                raise GitHubError("UNEXPECTED_STATUS", "Không đọc được danh sách pull request.")
+            try:
+                items = _list_of_dicts(response)
+                for item in items:
+                    state, user = item["state"], item["user"]
+                    if state not in ("open", "closed") or not isinstance(user, dict):
+                        raise TypeError
+                    login, kind = user["login"], user["type"]
+                    if not isinstance(login, str) or not isinstance(kind, str):
+                        raise TypeError
+                    if (state, login, kind) == ("open", "dependabot[bot]", "Bot"):
+                        pulls.append(DependabotPull(
+                            number=item["number"], title=item["title"], ref=item["head"]["ref"],
+                        ))
+            except (ValueError, TypeError, KeyError):
+                raise GitHubError("BAD_RESPONSE", "Phản hồi pull request không hợp lệ.") from None
+            # Chỉ dùng quan hệ next, giữ nguyên đích GET đã kiểm tra.
+            if "next" not in response.links and len(items) < PER_PAGE:
+                return pulls
+        raise GitHubError("TOO_MANY_PAGES", "Danh sách pull request chưa đầy đủ.")
