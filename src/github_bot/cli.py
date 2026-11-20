@@ -1,6 +1,7 @@
 import argparse
 import re
 from pathlib import Path
+from string import punctuation
 
 import httpx
 
@@ -131,6 +132,53 @@ def _apply(args: argparse.Namespace, transport: httpx.BaseTransport | None = Non
     return code
 
 
+_DEPENDABOT_GROUPS = {"pip": "Runtime", "uv": "Runtime", "github_actions": "CI"}
+_DEPENDABOT_REF = re.compile(r"dependabot/([A-Za-z0-9_-]+)/.+")
+_MARKDOWN_TEXT = str.maketrans({
+    ch: f"&#{ord(ch)};" for ch in punctuation.replace("-", "") + "\u2028\u2029"
+})
+
+
+def _dependabot_report(args: argparse.Namespace, transport: httpx.BaseTransport | None) -> int:
+    custom: dict[str, str] = {}
+    for option in args.group:
+        ecosystem, _, name = option.partition("=")
+        key = ecosystem.strip().lower().replace("-", "_")
+        if not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", key) or not name.strip() or key in custom:
+            print("LỖI: --group cần ECOSYSTEM=NAME hợp lệ và mỗi ecosystem chỉ được khai báo một lần.")
+            return 2
+        custom[key] = name.strip()
+
+    owner, _, repo = args.repo.partition("/")
+    try:
+        client = GitHubClient(transport=transport)
+        try:
+            pulls = client.list_dependabot_pulls(owner, repo)
+        finally:
+            client.close()
+    except GitHubError as error:
+        print(f"LỖI [{error.code}]: Không thể lập báo cáo Dependabot.")
+        return 2
+
+    groups = _DEPENDABOT_GROUPS | custom
+    sections: dict[str, list[str]] = {}
+    for pull in pulls:
+        match = _DEPENDABOT_REF.fullmatch(pull.ref)
+        ecosystem = match[1].lower().replace("-", "_") if match else ""
+        name = groups.get(ecosystem, "Chưa phân nhóm")
+        url = f"https://github.com/{owner}/{repo}/pull/{pull.number}"
+        title = _show(pull.title).translate(_MARKDOWN_TEXT)
+        sections.setdefault(name, []).append(f"- [#{pull.number}]({url}) {title}")
+
+    print("# Pull request Dependabot đang mở")
+    if not sections:
+        print("\nKhông có pull request Dependabot đang mở.")
+    for name, rows in sections.items():
+        print(f"\n## {_show(name).translate(_MARKDOWN_TEXT)}\n")
+        print("\n".join(rows))
+    return 0
+
+
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
@@ -163,6 +211,16 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     ap.add_argument("--repo", help="Nếu có, phải khớp repo trong plan")
     ap.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc/ghi")
     ap.set_defaults(func=lambda a: _apply(a, transport))
+    dependabot = sub.add_parser("dependabot", help="Báo cáo pull request Dependabot")
+    report = dependabot.add_subparsers(dest="cmd", required=True).add_parser(
+        "report", help="Báo cáo Markdown chỉ đọc từ GitHub"
+    )
+    report.add_argument("--repo", required=True, help="OWNER/REPO")
+    report.add_argument(
+        "--group", action="append", default=[], metavar="ECOSYSTEM=NAME",
+        help="Gán ecosystem vào nhóm, có thể dùng nhiều lần",
+    )
+    report.set_defaults(func=lambda a: _dependabot_report(a, transport))
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")
