@@ -1,0 +1,131 @@
+name: Apply Realcheck issue
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: >-
+      github.repository == 'AIVIETNAM-AIO-luciusHo/automation-bot-QA' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: false
+      - run: uv sync --locked --no-dev
+      - name: Chuẩn bị fixture
+        env:
+          REALCHECK_ASSIGNEE: ${{ vars.REALCHECK_ASSIGNEE }}
+        run: |
+          workspace="$RUNNER_TEMP/issue-plan"
+          mkdir -p "$workspace"
+          cp tests/fixtures/realcheck/tasks.md "$workspace/tasks.md"
+          uv run --no-sync python - "$workspace/members.yaml" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from github_bot.identities.resolver import GITHUB_LOGIN
+
+          login = os.environ["REALCHECK_ASSIGNEE"]
+          if not GITHUB_LOGIN.fullmatch(login):
+              sys.exit("Thiếu hoặc sai định dạng biến Actions REALCHECK_ASSIGNEE.")
+          members = {"TV01": {"display_name": "Thành viên thử nghiệm", "github": login}}
+          Path(sys.argv[1]).write_text(json.dumps({"members": members}), encoding="utf-8")
+          PY
+      - name: Lập plan Realcheck chỉ đọc
+        env:
+          GITHUB_TOKEN: ${{ secrets.REALCHECK_READ_TOKEN }}
+        run: |
+          uv run --no-sync github-bot issues plan --workspace "$RUNNER_TEMP/issue-plan" \
+            --input tasks.md --members members.yaml --repo AIVIETNAM-AIO-luciusHo/realcheck \
+            --max-tasks 1 --output-dir preview
+      - name: Ghi manifest và tóm tắt để reviewer đối chiếu
+        shell: bash
+        run: |
+          checkout_sha="$(git rev-parse HEAD)"
+          uv run --no-sync python -m github_bot.execution.workflow_approval manifest \
+            --checkout-sha "$checkout_sha" --workspace "$RUNNER_TEMP/issue-plan/preview" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Tải lên plan cùng run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: issue-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/issue-plan/preview/plan.json
+            ${{ runner.temp }}/issue-plan/preview/PREVIEW.md
+            ${{ runner.temp }}/issue-plan/preview/manifest.json
+
+  apply:
+    needs: plan
+    if: >-
+      github.repository == 'AIVIETNAM-AIO-luciusHo/automation-bot-QA' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: realcheck-issue-write
+    permissions:
+      actions: read
+      contents: read
+    concurrency:
+      group: issue-write-aivietnam-aio-luciusho-realcheck
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: false
+      - run: uv sync --locked --no-dev
+      - name: Tải plan của chính run này
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: issue-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-issue-plan
+      - name: Xác minh plan, main và approval
+        id: verify
+        shell: bash
+        env:
+          ACTIONS_READ_TOKEN: ${{ github.token }}
+        run: |
+          checkout_sha="$(git rev-parse HEAD)"
+          digest="$(uv run --no-sync python -m github_bot.execution.workflow_approval verify \
+            --checkout-sha "$checkout_sha" --workspace "$RUNNER_TEMP/verified-issue-plan")"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'plan_sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Áp dụng plan đã duyệt
+        env:
+          GITHUB_TOKEN: ${{ secrets.REALCHECK_ISSUES_WRITE_TOKEN }}
+          APPROVED_HASH: ${{ steps.verify.outputs.plan_sha256 }}
+        run: |
+          uv run --no-sync github-bot issues apply --workspace "$RUNNER_TEMP/verified-issue-plan" \
+            --plan plan.json --repo AIVIETNAM-AIO-luciusHo/realcheck \
+            --approve-hash "$APPROVED_HASH" --write
+      - name: Lưu bằng chứng apply
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: issue-apply-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/verified-issue-plan/apply-provenance.json
+            ${{ runner.temp }}/verified-issue-plan/audit-*.jsonl
