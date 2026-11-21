@@ -113,10 +113,13 @@ def index_markers(issues: list[IssueRef]) -> dict[tuple[str, str], list[tuple[in
     return hits
 
 
-def plan_hash(plan: Plan) -> str:
-    content = plan.model_dump(exclude={"plan_sha256"})
+def canonical_plan_hash(content: dict[str, object]) -> str:
     blob = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def plan_hash(plan: Plan) -> str:
+    return canonical_plan_hash(plan.model_dump(exclude={"plan_sha256"}))
 
 
 def build_plan(
@@ -189,12 +192,28 @@ def render_md(plan: Plan) -> str:
     return "\n".join(out)
 
 
-def write_preview(plan: Plan, out_dir: str | Path, workspace: str | Path) -> list[Path]:
-    """Ghi PREVIEW.md, PREVIEW.json, plan.json vào out_dir (phải nằm trong workspace). Từ chối symlink/thư mục trùng tên."""
+def preview_output_dir(
+    out_dir: str | Path, workspace: str | Path, *, no_symlinks: bool = False,
+) -> Path:
     root = Path(workspace).resolve()
-    target = (root / out_dir).resolve()
+    requested = root / out_dir
+    if no_symlinks:
+        if not requested.is_relative_to(root) or ".." in requested.relative_to(root).parts:
+            raise PlanError("output-dir nằm ngoài workspace, bị chặn.")
+        for path in (requested, *requested.parents):
+            if path == root:
+                break
+            if path.is_symlink():
+                raise PlanError("output-dir đi qua symlink, bị chặn.")
+    target = requested.resolve()
     if not target.is_relative_to(root):
         raise PlanError("output-dir nằm ngoài workspace, bị chặn.")
+    return target
+
+
+def write_preview(plan: Plan, out_dir: str | Path, workspace: str | Path) -> list[Path]:
+    """Ghi PREVIEW.md, PREVIEW.json, plan.json vào out_dir (phải nằm trong workspace). Từ chối symlink/thư mục trùng tên."""
+    target = preview_output_dir(out_dir, workspace)
     target.mkdir(parents=True, exist_ok=True)
     js = json.dumps(plan.model_dump(), sort_keys=True, ensure_ascii=False, indent=2) + "\n"
     paths = []
