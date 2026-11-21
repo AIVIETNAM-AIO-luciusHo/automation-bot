@@ -8,6 +8,7 @@ import httpx
 
 from github_bot import __version__
 from github_bot.execution.dependency_pr import dependency_pr_apply
+from github_bot.execution.dependency_publish import publish, publish_plan
 from github_bot.execution.issue_executor import ApplyRejected, apply_plan
 from github_bot.github.client import GitHubClient, GitHubError
 from github_bot.github.validator import validate_against_github
@@ -234,7 +235,33 @@ def _dependency_pr_apply(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:
+def _dependency_publish(
+    args: argparse.Namespace, transport: httpx.BaseTransport | None, publish_remote: str | None,
+) -> int:
+    try:
+        if args.cmd == "pr-publish-plan":
+            result = publish_plan(args.workspace, args.plan, args.base, transport, publish_remote)
+        else:
+            result = publish(
+                args.workspace, args.plan, args.approve_hash, args.write, transport, publish_remote,
+            )
+    except PlanError as error:
+        print(_show(f"LỖI: {error}"))
+        return 2
+    except GitHubError as error:
+        print(f"LỖI [{error.code}]: Không xác minh được thao tác xuất bản.")
+        return 2
+    except (OSError, ValueError, RuntimeError):
+        print("LỖI: Không kiểm tra được workspace hoặc dữ liệu xuất bản.")
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def main(
+    argv: list[str] | None = None, transport: httpx.BaseTransport | None = None,
+    *, publish_remote: str | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         prog="github-bot",
         description="Bot chuyển Markdown công việc thành GitHub Issues. Hiện chưa có lệnh ghi GitHub.",
@@ -304,6 +331,15 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     pr_apply.add_argument("--approve-hash", required=True, help="SHA-256 của plan đã duyệt")
     pr_apply.add_argument("--write", action="store_true", help="Cho phép ghi nhánh Git cục bộ")
     pr_apply.set_defaults(func=_dependency_pr_apply)
+    preview = dependency_commands.add_parser("pr-publish-plan", help="Xem trước xuất bản draft PR")
+    delivery = dependency_commands.add_parser("pr-publish", help="Xuất bản draft PR đã duyệt")
+    for command in (preview, delivery):
+        command.add_argument("--workspace", type=Path, required=True, help="Gốc Git worktree")
+        command.add_argument("--plan", required=True, help="Tệp plan JSON trong workspace")
+        command.set_defaults(func=lambda a: _dependency_publish(a, transport, publish_remote))
+    preview.add_argument("--base", required=True, help="Tên nhánh base từ xa")
+    delivery.add_argument("--approve-hash", required=True, help="SHA-256 của plan xuất bản")
+    delivery.add_argument("--write", action="store_true", help="Cho phép push và tạo draft PR")
     args, extra = parser.parse_known_args(argv)
     if extra:  # không in lại tham số (có thể là bí mật gõ nhầm như --token)
         print(f"LỖI: {len(extra)} tham số không được hỗ trợ (xem --help).")

@@ -256,3 +256,21 @@ class GitHubClient:
             if "next" not in response.links and len(items) < PER_PAGE:
                 return pulls
         raise GitHubError("TOO_MANY_PAGES", "Danh sách pull request chưa đầy đủ.")
+
+    def list_pulls_for_head(self, owner: str, repo: str, head: str) -> list[dict[str, object]]:
+        path = f"{self._repo_path(owner, repo)}/pulls"
+        pulls: list[dict[str, object]] = []
+        for page in range(1, self._max_pages + 1):
+            response = self._get(path, {
+                "state": "all", "head": f"{owner}:{head}", "per_page": PER_PAGE, "page": page,
+            })
+            if response.status_code != 200:
+                raise GitHubError("UNEXPECTED_STATUS", "Không đọc được danh sách pull request.")
+            try:
+                items = _list_of_dicts(response)
+            except (TypeError, ValueError):
+                raise GitHubError("BAD_RESPONSE", "Phản hồi pull request không hợp lệ.") from None
+            pulls.extend(items)
+            if "next" not in response.links and len(items) < PER_PAGE:
+                return pulls
+        raise GitHubError("TOO_MANY_PAGES", "Danh sách pull request chưa đầy đủ.")

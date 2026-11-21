@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +18,7 @@ from github_bot.planning.dependency_pr import (
 from github_bot.planning.planner import PlanError
 
 _HASH = re.compile(r"[0-9a-f]{64}")
+_PlanType = TypeVar("_PlanType", bound=BaseModel)
 
 
 class _File(BaseModel):
@@ -45,18 +47,20 @@ def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return values
 
 
-def _load_plan(workspace: Path, path: str, approved: str) -> _Plan:
-    if not _HASH.fullmatch(approved):
+def _load_hashed_plan(
+    workspace: Path, path: str, model: type[_PlanType], approved: str | None,
+) -> _PlanType:
+    if approved is not None and not _HASH.fullmatch(approved):
         raise PlanError("--approve-hash phải là SHA-256 dạng 64 ký tự hex thường.")
     try:
         if (workspace / path).is_symlink():
             raise PlanError("Plan không được là symlink.")
         text, _ = read_workspace_file(path, workspace, (".json",))
-        plan = _Plan.model_validate(json.loads(text, object_pairs_hook=_unique_keys))
+        plan = model.model_validate(json.loads(text, object_pairs_hook=_unique_keys))
         digest = dependency_plan_hash(plan.model_dump(exclude={"plan_sha256"}))
     except (LoaderError, OSError, ValueError, RuntimeError):
         raise PlanError("Không đọc được plan JSON hợp lệ trong workspace.") from None
-    if digest != approved or plan.plan_sha256 != approved:
+    if (approved is not None and digest != approved) or plan.model_dump()["plan_sha256"] != digest:
         raise PlanError("Hash không khớp nội dung plan đã duyệt.")
     return plan
 
@@ -83,7 +87,7 @@ def _expected_tree(root: Path, plan: _Plan) -> str:
 def dependency_pr_apply(workspace: Path, path: str, approved: str, write: bool) -> dict[str, str]:
     if not write:
         raise PlanError("Ghi nhánh cục bộ cần cờ --write.")
-    plan = _load_plan(workspace, path, approved)
+    plan = _load_hashed_plan(workspace, path, _Plan, approved)
 
     def verify_plan() -> None:
         current = dependency_pr_plan(
