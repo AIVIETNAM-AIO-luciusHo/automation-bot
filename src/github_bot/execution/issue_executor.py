@@ -1,4 +1,4 @@
-"""Executor GHI duy nhất của bot: chỉ tạo issue (POST /repos/{o}/{r}/issues) từ plan đã duyệt bằng hash.
+"""Điểm POST duy nhất của bot cho tạo issue và draft PR từ plan đã duyệt.
 
 Mọi cổng kiểm tra chạy TRƯỚC khi có POST đầu tiên; từ chối = 0 POST. Không PUT/PATCH/DELETE, không đổi
 state, không comment, không theo redirect (kế thừa từ client đọc)."""
@@ -9,8 +9,9 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from httpx import Response
 from pydantic import ValidationError
 
 from github_bot.github.client import GitHubClient, GitHubError, IssueRef, _logins
@@ -34,10 +35,16 @@ class ApplyRejected(Exception):
 
 
 class IssueWriter(GitHubClient):
-    """Client ghi: kế thừa cấu hình an toàn của client đọc, thêm đúng MỘT thao tác tạo issue."""
+    """Điểm duy nhất gửi POST cho thao tác tạo issue và draft PR."""
+
+    def _post_creation(
+        self, owner: str, repo: str, resource: Literal["issues", "pulls"],
+        payload: dict[str, object],
+    ) -> Response:
+        return self._request("POST", f"{self._repo_path(owner, repo)}/{resource}", None, payload, (201,))
 
     def create_issue(self, owner: str, repo: str, payload: dict[str, object]) -> dict[str, Any]:
-        r = self._request("POST", f"{self._repo_path(owner, repo)}/issues", None, payload, (201,))
+        r = self._post_creation(owner, repo, "issues", payload)
         try:
             data = r.json()
             if not isinstance(data, dict) or not isinstance(data["number"], int) or not isinstance(data["html_url"], str):
@@ -46,6 +53,19 @@ class IssueWriter(GitHubClient):
         except (ValueError, TypeError, KeyError):
             raise GitHubError("BAD_RESPONSE", "Phản hồi tạo issue không hợp lệ; kiểm tra thủ công.", 201) from None
         return {"number": data["number"], "url": data["html_url"], "assignees": logins}
+
+    def create_draft_pull(
+        self, owner: str, repo: str, *, head: str, base: str, title: str,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"head": head, "base": base, "title": title, "draft": True}
+        response = self._post_creation(owner, repo, "pulls", payload)
+        try:
+            data = response.json()
+            if isinstance(data, dict):
+                return data
+        except ValueError:
+            pass
+        raise GitHubError("BAD_RESPONSE", "Phản hồi tạo draft PR không hợp lệ.", 201)
 
 
 def load_plan(path: str, workspace: str | Path, approve_hash: str) -> Plan:

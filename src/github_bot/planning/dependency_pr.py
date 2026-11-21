@@ -19,6 +19,7 @@ _UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u206
 def _git_result(
     root: Path, *args: str, data: bytes | None = None,
     index: Path | None = None, allowed: tuple[int, ...] = (0,),
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     env = {key: os.environ[key] for key in ("PATH", "SystemRoot") if key in os.environ}
     env.update(
@@ -31,6 +32,8 @@ def _git_result(
         GIT_TERMINAL_PROMPT="0",
         LC_ALL="C",
     )
+    if extra_env is not None:
+        env.update(extra_env)
     command = [
         "git", "--no-optional-locks", "-c", "core.fsmonitor=false",
         "-c", f"core.hooksPath={os.devnull}",
