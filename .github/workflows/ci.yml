@@ -1,14 +1,46 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-      - run: uv sync
-      - run: uv run ruff check
-      - run: uv run mypy src
-      - run: uv run pytest
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Kiểm tra workflow với actionlint
+        shell: bash
+        run: |
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/actionlint.XXXXXX")"
+          archive="$tool_dir/actionlint.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" \
+            | sha256sum --check --strict
+          tar -xzf "$archive" -C "$tool_dir" actionlint
+          "$tool_dir/actionlint"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: uv sync --locked
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync mypy src
+      - run: uv run --no-sync pytest
+      - name: Kiểm tra CLI entrypoint
+        run: |
+          uv run --no-sync github-bot --help
+          uv run --no-sync github-bot issues validate --help
