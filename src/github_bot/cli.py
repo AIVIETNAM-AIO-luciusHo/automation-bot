@@ -16,7 +16,8 @@ from github_bot.markdown.loader import LoaderError, load_markdown
 from github_bot.markdown.parsers import parse_markdown
 from github_bot.models import Diagnostic
 from github_bot.planning.dependency_pr import dependency_pr_plan
-from github_bot.planning.planner import PlanError, build_plan, write_preview
+from github_bot.planning.offline_preview import validate_preview_target, write_offline_preview
+from github_bot.planning.planner import MAX_ASSIGNEES, PlanError, build_plan, write_preview
 
 # điều khiển C0/C1 + bidi/zero-width (U+200B-200F, 202A-202E, 2066-2069) có thể đánh lừa terminal
 _CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
@@ -120,6 +121,37 @@ def _plan(args: argparse.Namespace, transport: httpx.BaseTransport | None = None
     print(f"{len(plan.items)} task, {blocked} BLOCK. Plan SHA256: {plan.plan_sha256}")
     print("Write actions: DISABLED until approval")
     return 1 if blocked else 0
+
+
+def _preview(args: argparse.Namespace) -> int:
+    try:
+        validate_preview_target(args.repo, args.allowed_repo, args.source_sha)
+        text, source = load_markdown(args.input, args.workspace)
+        directory = load_members(args.members, args.workspace)
+        result = parse_markdown(text, source)
+        resolved = [resolve_task(task, directory) for task in result.tasks]
+        diagnostics = result.diagnostics + [d for identity in resolved for d in identity.diagnostics]
+        for diagnostic in diagnostics:
+            print(_show(f"{diagnostic.level.upper()} [{diagnostic.code}] {diagnostic.message}"))
+        if not result.tasks or any(d.level == "error" for d in diagnostics):
+            print("BLOCK: dữ liệu task hoặc danh bạ không hợp lệ.")
+            return 1
+        for identity in resolved:
+            if len(identity.assignees) > MAX_ASSIGNEES:
+                print(f"BLOCK [TOO_MANY_ASSIGNEES]: mỗi issue có tối đa {MAX_ASSIGNEES} người phụ trách.")
+                return 1
+        digest = write_offline_preview(
+            tasks=result.tasks, resolved=resolved, workspace=args.workspace,
+            output_dir=args.output_dir, source=source, repo=args.repo, sha=args.source_sha,
+        )
+    except (GitHubError, LoaderError, MembersError, PlanError) as error:
+        print(_show(f"LỖI: {error}"))
+        return 2
+    except (OSError, RuntimeError, UnicodeError):
+        print("LỖI: Không đọc được đầu vào hoặc ghi được artifact trong workspace.")
+        return 2
+    print(f"{len(result.tasks)} task. Preview SHA-256: {digest}.")
+    return 0
 
 
 def _apply(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
@@ -227,6 +259,15 @@ def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = 
     pl.add_argument("--max-tasks", type=int, default=50, help="max_tasks_per_run (mặc định 50)")
     pl.add_argument("--workspace", type=Path, default=Path.cwd(), help="Thư mục gốc cho phép đọc/ghi")
     pl.set_defaults(func=lambda a: _plan(a, transport))
+    preview = issues.add_parser("preview", help="Tạo artifact tham khảo offline")
+    preview.add_argument("--workspace", type=Path, default=Path.cwd(), help="Gốc workspace")
+    preview.add_argument("--input", required=True, help="File Markdown trong workspace")
+    preview.add_argument("--members", required=True, help="Danh bạ trong workspace")
+    preview.add_argument("--repo", required=True, help="Repo đích OWNER/REPO")
+    preview.add_argument("--allowed-repo", action="append", required=True, help="Repo cho phép, có thể lặp")
+    preview.add_argument("--source-sha", required=True, help="SHA checkout đã kiểm tra")
+    preview.add_argument("--output-dir", required=True, help="Thư mục artifact trong workspace")
+    preview.set_defaults(func=_preview)
     ap = issues.add_parser("apply", help="GHI: tạo issue từ plan đã duyệt (cần --write và --approve-hash)")
     ap.add_argument("--plan", required=True, help="plan.json trong workspace")
     ap.add_argument("--approve-hash", required=True, help="SHA-256 của plan (từ `issues plan`); không có approve-all")

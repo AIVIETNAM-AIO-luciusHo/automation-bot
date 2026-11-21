@@ -1,0 +1,58 @@
+name: Task preview
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/tasks-preview.yml
+      - docs/IMPLEMENTATION_TASKS.md
+      - configs/members.example.yaml
+      - src/github_bot/**
+      - pyproject.toml
+      - uv.lock
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: false
+      - run: uv sync --locked --no-dev
+      - name: Kiểm tra và tạo preview offline
+        id: preview
+        shell: bash
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          output="$(mktemp -d "$GITHUB_WORKSPACE/task-preview.XXXXXX")"
+          uv run --no-sync github-bot issues preview --workspace "$GITHUB_WORKSPACE" \
+            --input docs/IMPLEMENTATION_TASKS.md --members configs/members.example.yaml \
+            --repo "$GITHUB_REPOSITORY" --allowed-repo "$GITHUB_REPOSITORY" \
+            --source-sha "$source_sha" --output-dir "$output"
+          printf 'directory=%s\n' "$output" >> "$GITHUB_OUTPUT"
+          printf '%s\n' '## Preview task offline' '' \
+            'Đã kiểm tra backlog và danh bạ mẫu. Xem artifact task-preview để đối chiếu dữ liệu.' \
+            'Trạng thái issue, nhãn và quyền gán trên GitHub chưa được kiểm tra.' \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Tải lên preview
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: task-preview
+          if-no-files-found: error
+          path: |
+            ${{ steps.preview.outputs.directory }}/plan.json
+            ${{ steps.preview.outputs.directory }}/PREVIEW.md
+            ${{ steps.preview.outputs.directory }}/metadata.json
